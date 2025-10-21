@@ -1,0 +1,57 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-ocean-deep text-ocean-text;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+
+  * {
+    @apply transition-colors duration-150;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-ocean-primary hover:bg-ocean-primary/80 text-white font-medium px-4 py-2 rounded-lg transition-all duration-150;
+  }
+
+  .btn-secondary {
+    @apply bg-ocean-container hover:bg-ocean-container/80 text-ocean-surface border border-ocean-surface/30 font-medium px-4 py-2 rounded-lg transition-all duration-150;
+  }
+
+  .card {
+    @apply bg-ocean-container rounded-xl shadow-ocean-lg p-6;
+  }
+
+  .input-field {
+    @apply bg-ocean-deep border border-ocean-primary/30 rounded-lg px-4 py-2 text-ocean-text placeholder-gray-500 focus:border-ocean-surface focus:outline-none focus:ring-2 focus:ring-ocean-surface/20;
+  }
+
+  .spinner {
+    @apply w-6 h-6 border-2 border-ocean-surface border-t-transparent rounded-full animate-spin;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #001D3D;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #0077B6;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #48CAE4;
+}
