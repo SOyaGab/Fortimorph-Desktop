@@ -130,16 +130,19 @@ ipcMain.handle('app-version', async () => {
 // Authentication IPC handlers
 ipcMain.handle('auth:signup', async (event, { email, password }) => {
   try {
+    console.log('IPC: Signup request for', email);
     const result = await auth.signup(email, password);
+    console.log('IPC: Signup result:', result.success ? 'Success' : result.error);
     
-    if (result.success) {
-      // Send verification email
+    if (result.success && !result.autoVerified && result.verificationCode) {
+      // Send verification email only if not auto-verified
       await email.sendVerificationCode(email, result.verificationCode);
     }
     
     return result;
   } catch (error) {
-    return { success: false, error: error.message };
+    console.error('IPC: Signup error:', error);
+    return { success: false, error: error.message || 'Signup failed' };
   }
 });
 
@@ -174,18 +177,22 @@ ipcMain.handle('auth:resend-code', async (event, { email }) => {
 
 ipcMain.handle('auth:login', async (event, { email, password }) => {
   try {
+    console.log('IPC: Login request for', email);
     const result = await auth.login(email, password);
+    console.log('IPC: Login result:', result.success ? 'Success' : result.error);
     
     if (result.success) {
       sessionData.isAuthenticated = true;
       sessionData.user = result.user;
       sessionData.sessionToken = result.sessionToken;
       startSessionTimeout();
+      console.log('Session started for:', email);
     }
     
     return result;
   } catch (error) {
-    return { success: false, error: error.message };
+    console.error('IPC: Login error:', error);
+    return { success: false, error: error.message || 'Login failed' };
   }
 });
 

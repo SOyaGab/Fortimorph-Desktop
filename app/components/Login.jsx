@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import DevBanner from './DevBanner';
 
 function Login({ onSwitchToSignup, onSwitchToReset, onLoginSuccess }) {
   const [email, setEmail] = useState('');
@@ -12,15 +13,19 @@ function Login({ onSwitchToSignup, onSwitchToReset, onLoginSuccess }) {
     setLoading(true);
 
     try {
+      console.log('Attempting login for:', email);
       const result = await window.electronAPI.auth.login(email, password);
+      console.log('Login response:', result);
 
       if (result.success) {
+        console.log('Login successful, user:', result.user);
         onLoginSuccess(result.user);
       } else {
-        setError(result.error);
+        setError(result.error || 'Login failed');
       }
     } catch (err) {
-      setError('An unexpected error occurred');
+      console.error('Login error:', err);
+      setError('Network error: ' + (err.message || 'Please check console for details'));
     } finally {
       setLoading(false);
     }
@@ -28,6 +33,7 @@ function Login({ onSwitchToSignup, onSwitchToReset, onLoginSuccess }) {
 
   return (
     <div className="min-h-screen bg-ocean-deep flex items-center justify-center p-4">
+      <DevBanner />
       <div className="w-full max-w-md">
         {/* Logo/Header */}
         <div className="text-center mb-8">

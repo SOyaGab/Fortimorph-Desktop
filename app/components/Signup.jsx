@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import DevBanner from './DevBanner';
 
 function Signup({ onSwitchToLogin, onSignupSuccess }) {
   const [email, setEmail] = useState('');
@@ -25,15 +26,25 @@ function Signup({ onSwitchToLogin, onSignupSuccess }) {
     setLoading(true);
 
     try {
+      console.log('Attempting signup for:', email);
       const result = await window.electronAPI.auth.signup(email, password);
+      console.log('Signup response:', result);
 
       if (result.success) {
-        onSignupSuccess(email, result.verificationCode);
+        if (result.autoVerified) {
+          // In dev mode, account is auto-verified, go straight to login
+          alert(result.message + '\n\nYou can now login with your credentials.');
+          onSwitchToLogin();
+        } else {
+          // Production mode, show verification screen
+          onSignupSuccess(email, result.verificationCode);
+        }
       } else {
-        setError(result.error);
+        setError(result.error || 'Signup failed');
       }
     } catch (err) {
-      setError('An unexpected error occurred');
+      console.error('Signup error:', err);
+      setError('Network error: ' + (err.message || 'Please check console for details'));
     } finally {
       setLoading(false);
     }
@@ -41,6 +52,7 @@ function Signup({ onSwitchToLogin, onSignupSuccess }) {
 
   return (
     <div className="min-h-screen bg-ocean-deep flex items-center justify-center p-4">
+      <DevBanner />
       <div className="w-full max-w-md">
         {/* Logo/Header */}
         <div className="text-center mb-8">

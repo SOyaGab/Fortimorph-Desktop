@@ -7,6 +7,7 @@ const MAX_LOGIN_ATTEMPTS = 3;
 const LOCKOUT_DURATION = 5 * 60; // 5 minutes in seconds
 const VERIFICATION_CODE_EXPIRY = 10 * 60; // 10 minutes
 const RESET_CODE_EXPIRY = 15 * 60; // 15 minutes
+const IS_DEVELOPMENT = process.env.NODE_ENV !== 'production';
 
 class AuthService {
   /**
@@ -37,9 +38,12 @@ class AuthService {
    */
   async signup(email, password) {
     try {
+      console.log('Signup attempt for:', email);
+      
       // Check if user already exists
       const existingUser = db.getUserByEmail(email);
       if (existingUser) {
+        console.log('User already exists:', email);
         return { success: false, error: 'User already exists' };
       }
 
@@ -55,12 +59,27 @@ class AuthService {
       }
 
       // Hash password
+      console.log('Hashing password...');
       const passwordHash = await this.hashPassword(password);
 
       // Create user
+      console.log('Creating user in database...');
       db.createUser(email, passwordHash);
 
-      // Generate verification code
+      // In development mode, auto-verify the user
+      if (IS_DEVELOPMENT) {
+        console.log('🔧 DEVELOPMENT MODE: Auto-verifying user');
+        db.updateUserVerification(email, 1);
+        db.addLog('auth', 'User registered and auto-verified (dev mode)', { email });
+        
+        return {
+          success: true,
+          message: 'Account created and verified! You can now login.',
+          autoVerified: true,
+        };
+      }
+
+      // Production mode: Generate verification code
       const code = this.generateCode(6);
       const expiresAt = Math.floor(Date.now() / 1000) + VERIFICATION_CODE_EXPIRY;
       db.setVerificationCode(email, code, expiresAt);
@@ -71,7 +90,7 @@ class AuthService {
       return {
         success: true,
         message: 'User created successfully. Please verify your email.',
-        verificationCode: code, // In production, this would be sent via email
+        verificationCode: code,
       };
     } catch (error) {
       console.error('Signup error:', error);
