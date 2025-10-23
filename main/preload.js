@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   auth: {
     signup: (email, password) => ipcRenderer.invoke('auth:signup', { email, password }),
     verifyEmail: (email, code) => ipcRenderer.invoke('auth:verify-email', { email, code }),
+    checkEmailVerified: (email) => ipcRenderer.invoke('auth:check-email-verified', { email }),
     resendCode: (email) => ipcRenderer.invoke('auth:resend-code', { email }),
     login: (email, password) => ipcRenderer.invoke('auth:login', { email, password }),
     logout: () => ipcRenderer.invoke('auth:logout'),
@@ -22,6 +23,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('auth:reset-password', { email, code, newPassword }),
     checkSession: () => ipcRenderer.invoke('auth:check-session'),
     refreshSession: () => ipcRenderer.invoke('auth:refresh-session'),
+    resendVerification: (email) => ipcRenderer.invoke('auth:resend-verification', { email }),
+    debugUsers: () => ipcRenderer.invoke('auth:debug-users'),
+    manualVerify: (uid) => ipcRenderer.invoke('auth:manual-verify', { uid }),
   },
   
   // Session events
@@ -29,12 +33,35 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('session-expired', callback);
   },
   
-  // System operations (to be extended in Module C)
-  getSystemInfo: () => ipcRenderer.invoke('get-system-info'),
-  optimizeSystem: () => ipcRenderer.invoke('optimize-system'),
+  // System Monitoring
+  system: {
+    getMetrics: () => ipcRenderer.invoke('system:get-metrics'),
+    getProcesses: () => ipcRenderer.invoke('system:get-processes'),
+    getCPU: () => ipcRenderer.invoke('system:get-cpu'),
+    getMemory: () => ipcRenderer.invoke('system:get-memory'),
+    getBattery: () => ipcRenderer.invoke('system:get-battery'),
+    optimize: () => ipcRenderer.invoke('system:optimize'),
+    endProcess: (pid, force) => ipcRenderer.invoke('system:end-process', { pid, force }),
+    endProcesses: (pids) => ipcRenderer.invoke('system:end-processes', { pids }),
+    clearTemp: () => ipcRenderer.invoke('system:clear-temp'),
+    clearCache: () => ipcRenderer.invoke('system:clear-cache'),
+    getSuggestions: () => ipcRenderer.invoke('system:get-suggestions'),
+    getOptimizationHistory: () => ipcRenderer.invoke('system:get-optimization-history'),
+    getInstalledApps: () => ipcRenderer.invoke('system:get-installed-apps'),
+    getStorageAnalysis: (minSizeMB) => ipcRenderer.invoke('system:get-storage-analysis', { minSizeMB }),
+    openFile: (filePath) => ipcRenderer.invoke('system:open-file', { filePath }),
+    showInFolder: (filePath) => ipcRenderer.invoke('system:show-in-folder', { filePath }),
+    deleteFile: (filePath) => ipcRenderer.invoke('system:delete-file', { filePath }),
+    openFolder: (folderPath) => ipcRenderer.invoke('system:open-folder', { folderPath }),
+    deleteFolder: (folderPath) => ipcRenderer.invoke('system:delete-folder', { folderPath }),
+  },
+  
+  // Legacy system operations (kept for compatibility)
+  getSystemInfo: () => ipcRenderer.invoke('system:get-metrics'),
+  optimizeSystem: () => ipcRenderer.invoke('system:optimize'),
   
   // Process operations
-  endProcess: (pid) => ipcRenderer.invoke('end-process', pid),
+  endProcess: (pid) => ipcRenderer.invoke('system:end-process', { pid, force: false }),
   
   // Notification
   showNotification: (title, body) => ipcRenderer.invoke('show-notification', { title, body }),

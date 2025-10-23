@@ -47,15 +47,18 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
 
       if (result.success) {
         setCooldown(60); // 60 second cooldown
-        // Show the code in console for development
-        if (result.verificationCode) {
-          console.log('New verification code:', result.verificationCode);
-        }
+        setError(''); // Clear any previous errors
+        // Show success in UI
+        const successDiv = document.createElement('div');
+        successDiv.className = 'fixed top-4 right-4 bg-green-500 text-white px-6 py-3 rounded-lg shadow-lg';
+        successDiv.textContent = '✓ New verification code sent!';
+        document.body.appendChild(successDiv);
+        setTimeout(() => successDiv.remove(), 3000);
       } else {
         setError(result.error);
       }
     } catch (err) {
-      setError('Failed to resend code');
+      setError('Failed to resend verification code');
     } finally {
       setResending(false);
     }
@@ -107,19 +110,38 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
                 </div>
               )}
 
+              <div className="bg-ocean-primary/10 border border-ocean-primary/30 rounded-lg p-4">
+                <div className="flex items-start space-x-3">
+                  <div className="flex-shrink-0">
+                    <svg className="w-6 h-6 text-ocean-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                    </svg>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="text-sm font-medium text-ocean-surface mb-1">
+                      Check Your Email
+                    </h3>
+                    <p className="text-xs text-gray-400">
+                      We sent a 6-digit verification code to your email address. Enter it below to verify your account.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
               <div>
                 <label className="block text-sm font-medium text-ocean-surface mb-2">
                   Verification Code
                 </label>
                 <input
                   type="text"
-                  className="input-field w-full text-center text-2xl tracking-widest"
+                  className="input-field w-full text-center text-3xl tracking-[0.5em] font-mono"
                   placeholder="000000"
                   value={code}
                   onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
                   required
                   disabled={loading}
                   maxLength={6}
+                  autoComplete="off"
                 />
                 <p className="text-xs text-gray-400 mt-1 text-center">
                   Enter the 6-digit code from your email
@@ -141,7 +163,7 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
                 )}
               </button>
 
-              <div className="text-center">
+              <div className="text-center pt-4 border-t border-ocean-container">
                 <p className="text-sm text-gray-400 mb-2">Didn&apos;t receive the code?</p>
                 <button
                   type="button"
@@ -172,9 +194,9 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
           )}
         </div>
 
-        <div className="mt-6 p-4 bg-ocean-container/50 rounded-lg">
-          <p className="text-xs text-gray-400 text-center">
-            💡 <strong>Development Mode:</strong> Check the browser console for the verification code
+        <div className="mt-6 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+          <p className="text-xs text-yellow-400 text-center">
+            💡 <strong>Tip:</strong> Check your spam folder if you don&apos;t see the email
           </p>
         </div>
       </div>

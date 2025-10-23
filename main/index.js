@@ -2,11 +2,22 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const Store = require('electron-store');
 const db = require('./services/database');
-const auth = require('./services/auth');
-const email = require('./services/email');
+const firebase = require('./services/firebase');
+const emailService = require('./services/emailService');
+const monitoringService = require('./services/monitoring');
+const optimizerService = require('./services/optimizer');
 
 // Initialize electron-store for secure configuration
 const store = new Store();
+
+// Set app user model ID for Windows
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.fortimorph.desktop');
+}
+
+// Configure cache directory to avoid permission issues
+const cacheDir = path.join(app.getPath('userData'), 'Cache');
+app.setPath('cache', cacheDir);
 
 let mainWindow;
 let sessionData = {
@@ -32,6 +43,7 @@ function createWindow() {
       enableRemoteModule: false, // Security: disable remote module
       preload: path.join(__dirname, 'preload.js'),
       webSecurity: true,
+      cache: false, // Disable cache in development
     },
     icon: path.join(__dirname, '../assets/icons/icon.png'),
     show: false, // Don't show until ready-to-show
@@ -43,7 +55,9 @@ function createWindow() {
       responseHeaders: {
         ...details.responseHeaders,
         'Content-Security-Policy': [
-          "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:;",
+          process.env.NODE_ENV === 'development'
+            ? "default-src * 'unsafe-inline' 'unsafe-eval'; script-src * 'unsafe-inline' 'unsafe-eval'; connect-src * 'unsafe-inline'; img-src * data: blob: 'unsafe-inline'; frame-src *; style-src * 'unsafe-inline';"
+            : "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:;",
         ],
       },
     });
@@ -68,11 +82,22 @@ function createWindow() {
 }
 
 // App lifecycle
-app.whenReady().then(() => {
-  // Initialize database
+app.whenReady().then(async () => {
+  // Initialize services
   try {
-    db.initialize();
-    email.initialize();
+    console.log('Initializing services...');
+    await db.initialize();
+    console.log('Database initialized');
+    
+    const firebaseInitialized = firebase.initialize();
+    if (firebaseInitialized) {
+      console.log('Firebase initialized successfully');
+    } else {
+      console.warn('Firebase initialization skipped - check .env configuration');
+    }
+    
+    emailService.initialize();
+    console.log('Email service initialized');
   } catch (error) {
     console.error('Failed to initialize services:', error);
   }
@@ -130,45 +155,47 @@ ipcMain.handle('app-version', async () => {
 // Authentication IPC handlers
 ipcMain.handle('auth:signup', async (event, { email, password }) => {
   try {
-    console.log('IPC: Signup request for', email);
-    const result = await auth.signup(email, password);
-    console.log('IPC: Signup result:', result.success ? 'Success' : result.error);
-    
-    if (result.success && !result.autoVerified && result.verificationCode) {
-      // Send verification email only if not auto-verified
-      await email.sendVerificationCode(email, result.verificationCode);
-    }
-    
+    const result = await firebase.signup(email, password);
     return result;
   } catch (error) {
-    console.error('IPC: Signup error:', error);
-    return { success: false, error: error.message || 'Signup failed' };
+    console.error('Signup error:', error);
+    return { success: false, error: error.message || 'An unexpected error occurred' };
   }
 });
 
-ipcMain.handle('auth:verify-email', async (event, { email, code }) => {
+ipcMain.handle('auth:verify-email', async (_event, { code }) => {
   try {
-    const result = auth.verifyEmail(email, code);
-    
-    if (result.success) {
-      // Send welcome email
-      await email.sendWelcomeEmail(email);
+    // Get current user to get UID
+    const user = firebase.getCurrentUser();
+    if (!user) {
+      return { success: false, error: 'No user session found' };
     }
-    
+
+    const result = await firebase.verifyEmail(user.uid, code);
     return result;
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-ipcMain.handle('auth:resend-code', async (event, { email }) => {
+ipcMain.handle('auth:check-email-verified', async () => {
   try {
-    const result = auth.resendVerificationCode(email);
-    
-    if (result.success) {
-      await email.sendVerificationCode(email, result.verificationCode);
+    const result = await firebase.checkEmailVerified();
+    return result;
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('auth:resend-code', async () => {
+  try {
+    // Get current user to get UID
+    const user = firebase.getCurrentUser();
+    if (!user) {
+      return { success: false, error: 'No user session found' };
     }
-    
+
+    const result = await firebase.resendVerificationCode(user.uid, user.email);
     return result;
   } catch (error) {
     return { success: false, error: error.message };
@@ -177,51 +204,51 @@ ipcMain.handle('auth:resend-code', async (event, { email }) => {
 
 ipcMain.handle('auth:login', async (event, { email, password }) => {
   try {
-    console.log('IPC: Login request for', email);
-    const result = await auth.login(email, password);
-    console.log('IPC: Login result:', result.success ? 'Success' : result.error);
+    console.log('Login handler called for:', email);
+    const result = await firebase.login(email, password);
+    console.log('Firebase login result:', result);
     
     if (result.success) {
       sessionData.isAuthenticated = true;
       sessionData.user = result.user;
-      sessionData.sessionToken = result.sessionToken;
+      sessionData.sessionToken = result.user.uid;
       startSessionTimeout();
-      console.log('Session started for:', email);
+      console.log('Session established for user:', result.user.uid);
     }
     
     return result;
   } catch (error) {
-    console.error('IPC: Login error:', error);
+    console.error('Login handler error:', error);
     return { success: false, error: error.message || 'Login failed' };
   }
 });
 
 ipcMain.handle('auth:logout', async () => {
-  clearSession();
-  return { success: true };
+  try {
+    await firebase.logout();
+    clearSession();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 });
 
-ipcMain.handle('auth:request-reset', async (event, { email }) => {
+ipcMain.handle('auth:request-reset', async (_event, { email }) => {
   try {
-    const result = auth.requestPasswordReset(email);
-    
-    if (result.success && result.resetCode) {
-      await email.sendPasswordResetCode(email, result.resetCode);
-    }
-    
+    const result = await firebase.requestPasswordReset(email);
     return result;
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-ipcMain.handle('auth:reset-password', async (event, { email, code, newPassword }) => {
-  try {
-    const result = await auth.resetPassword(email, code, newPassword);
-    return result;
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
+ipcMain.handle('auth:reset-password', async (_event, _params) => {
+  // Firebase handles password reset via email link
+  // This is kept for compatibility
+  return {
+    success: true,
+    message: 'Password reset link sent to your email',
+  };
 });
 
 ipcMain.handle('auth:check-session', async () => {
@@ -237,6 +264,266 @@ ipcMain.handle('auth:refresh-session', async () => {
     return { success: true };
   }
   return { success: false, error: 'Not authenticated' };
+});
+
+ipcMain.handle('auth:resend-verification', async (_event, { email }) => {
+  try {
+    const result = await firebase.resendVerificationByEmail(email);
+    return result;
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Debug/Admin handlers
+ipcMain.handle('auth:debug-users', async () => {
+  try {
+    const users = db.getAllUsers();
+    const verificationCodes = db.getAllVerificationCodes();
+    return { success: true, users, verificationCodes };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('auth:manual-verify', async (_event, { uid }) => {
+  try {
+    const result = db.manuallyVerifyUser(uid);
+    return result;
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// ========================================
+// System Monitoring IPC Handlers
+// ========================================
+
+ipcMain.handle('system:get-metrics', async () => {
+  try {
+    const metrics = await monitoringService.getSystemMetrics();
+    return { success: true, data: metrics };
+  } catch (error) {
+    console.error('Error getting system metrics:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('system:get-processes', async () => {
+  try {
+    const processes = await monitoringService.getProcessList();
+    return { success: true, data: processes };
+  } catch (error) {
+    console.error('Error getting process list:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('system:get-cpu', async () => {
+  try {
+    const cpuMetrics = await monitoringService.getCPUMetrics();
+    return { success: true, data: cpuMetrics };
+  } catch (error) {
+    console.error('Error getting CPU metrics:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('system:get-memory', async () => {
+  try {
+    const memoryMetrics = await monitoringService.getMemoryMetrics();
+    return { success: true, data: memoryMetrics };
+  } catch (error) {
+    console.error('Error getting memory metrics:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('system:get-battery', async () => {
+  try {
+    const batteryInfo = await monitoringService.getBatteryInfo();
+    return { success: true, data: batteryInfo };
+  } catch (error) {
+    console.error('Error getting battery info:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ========================================
+// System Optimization IPC Handlers
+// ========================================
+
+ipcMain.handle('system:optimize', async () => {
+  try {
+    const result = await optimizerService.optimizeSystem();
+    return { success: true, data: result };
+  } catch (error) {
+    console.error('Error optimizing system:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('system:end-process', async (_event, { pid, force }) => {
+  try {
+    const result = await optimizerService.endProcess(pid, force);
+    return { success: result.success, data: result };
+  } catch (error) {
+    console.error('Error ending process:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('system:end-processes', async (_event, { pids }) => {
+  try {
+    const results = await optimizerService.endProcesses(pids);
+    return { success: true, data: results };
+  } catch (error) {
+    console.error('Error ending processes:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('system:clear-temp', async () => {
+  try {
+    const result = await optimizerService.clearTempFiles();
+    return { success: true, data: result };
+  } catch (error) {
+    console.error('Error clearing temp files:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('system:clear-cache', async () => {
+  try {
+    const result = await optimizerService.clearAppCache();
+    return { success: true, data: result };
+  } catch (error) {
+    console.error('Error clearing cache:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('system:get-suggestions', async () => {
+  try {
+    const metrics = await monitoringService.getSystemMetrics();
+    const suggestions = optimizerService.getOptimizationSuggestions(metrics);
+    return { success: true, data: suggestions };
+  } catch (error) {
+    console.error('Error getting optimization suggestions:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('system:get-optimization-history', async () => {
+  try {
+    const history = optimizerService.getOptimizationHistory();
+    return { success: true, data: history };
+  } catch (error) {
+    console.error('Error getting optimization history:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get installed applications
+ipcMain.handle('system:get-installed-apps', async () => {
+  console.log('========================================');
+  console.log('IPC: system:get-installed-apps called');
+  console.log('========================================');
+  
+  try {
+    console.log('Calling monitoringService.getInstalledApplications()...');
+    const apps = await monitoringService.getInstalledApplications();
+    
+    console.log('========================================');
+    console.log('Apps returned from monitoring service:', apps.length);
+    if (apps.length > 0) {
+      console.log('First app:', apps[0]);
+      console.log('Last app:', apps[apps.length - 1]);
+    }
+    console.log('========================================');
+    
+    return { success: true, data: apps };
+  } catch (error) {
+    console.error('========================================');
+    console.error('ERROR in system:get-installed-apps handler');
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    console.error('========================================');
+    return { success: false, error: error.message };
+  }
+});
+
+// Get storage analysis (large files and folders)
+ipcMain.handle('system:get-storage-analysis', async (_event, { minSizeMB }) => {
+  try {
+    const analysis = await monitoringService.getStorageAnalysis(minSizeMB || 100);
+    return { success: true, data: analysis };
+  } catch (error) {
+    console.error('Error getting storage analysis:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Open file with default application
+ipcMain.handle('system:open-file', async (_event, { filePath }) => {
+  try {
+    const { shell } = require('electron');
+    await shell.openPath(filePath);
+    return { success: true };
+  } catch (error) {
+    console.error('Error opening file:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Show file in folder (Windows Explorer)
+ipcMain.handle('system:show-in-folder', async (_event, { filePath }) => {
+  try {
+    const { shell } = require('electron');
+    shell.showItemInFolder(filePath);
+    return { success: true };
+  } catch (error) {
+    console.error('Error showing file in folder:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Delete file
+ipcMain.handle('system:delete-file', async (_event, { filePath }) => {
+  try {
+    const { shell } = require('electron');
+    // Move to recycle bin instead of permanent delete
+    await shell.trashItem(filePath);
+    return { success: true, message: 'File moved to Recycle Bin' };
+  } catch (error) {
+    console.error('Error deleting file:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Open folder with default file explorer
+ipcMain.handle('system:open-folder', async (_event, { folderPath }) => {
+  try {
+    const { shell } = require('electron');
+    await shell.openPath(folderPath);
+    return { success: true };
+  } catch (error) {
+    console.error('Error opening folder:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Delete folder (move to recycle bin)
+ipcMain.handle('system:delete-folder', async (_event, { folderPath }) => {
+  try {
+    const { shell } = require('electron');
+    // Move to recycle bin instead of permanent delete
+    await shell.trashItem(folderPath);
+    return { success: true, message: 'Folder moved to Recycle Bin' };
+  } catch (error) {
+    console.error('Error deleting folder:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 // Error handling
