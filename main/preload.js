@@ -72,5 +72,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
   restoreBackup: (backupId) => ipcRenderer.invoke('restore-backup', backupId),
 });
 
+// Expose logs API separately for cleaner access
+contextBridge.exposeInMainWorld('electron', {
+  invoke: (channel, ...args) => {
+    // Whitelist channels for security
+    const validChannels = [
+      'logs:getFiltered',
+      'logs:getTypes',
+      'logs:exportCSV',
+      'logs:exportJSON',
+      'logs:exportXML',
+      'logs:exportTXT',
+      'logs:exportHTML',
+      'logs:exportMarkdown',
+      'logs:exportDiagnostic',
+      'logs:openExportFolder',
+      'logs:cleanup'
+    ];
+    
+    if (validChannels.includes(channel)) {
+      return ipcRenderer.invoke(channel, ...args);
+    }
+    throw new Error(`Invalid IPC channel: ${channel}`);
+  }
+});
+
 // Log that preload has loaded
 console.log('Preload script loaded with context isolation enabled');

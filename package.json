@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "concurrently \"npm run dev:renderer\" \"npm run dev:main\" --kill-others",
     "dev:renderer": "vite",
-    "dev:main": "wait-on http://localhost:5173 && electron .",
+    "dev:main": "set NODE_ENV=development&& wait-on http://localhost:5173 && electron .",
     "build": "vite build && electron-builder",
     "build:win": "vite build && electron-builder --win",
     "lint": "eslint . --ext .js,.jsx",

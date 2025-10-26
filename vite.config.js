@@ -8,10 +8,20 @@ export default defineConfig({
   base: './',
   server: {
     port: 5173,
+    strictPort: true,
+    cors: true,
+    hmr: {
+      overlay: true,
+    },
   },
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: undefined,
+      },
+    },
   },
   resolve: {
     alias: {
@@ -19,5 +29,8 @@ export default defineConfig({
       '@components': path.resolve(__dirname, './app/components'),
       '@styles': path.resolve(__dirname, './app/styles'),
     },
+  },
+  optimizeDeps: {
+    exclude: ['electron'],
   },
 });

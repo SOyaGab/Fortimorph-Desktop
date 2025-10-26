@@ -65,28 +65,30 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
   };
 
   return (
-    <div className="min-h-screen bg-ocean-deep flex items-center justify-center p-4">
+    <div className="min-h-screen bg-ocean-deep flex items-center justify-center p-4 animate-fadeIn">
       <div className="w-full max-w-md">
         {/* Logo/Header */}
         <div className="text-center mb-8">
-          <div className="w-16 h-16 bg-ocean-primary rounded-xl flex items-center justify-center mx-auto mb-4">
-            <span className="text-2xl">📧</span>
+          <div className="w-16 h-16 bg-gradient-to-br from-ocean-primary to-ocean-surface rounded-xl flex items-center justify-center mx-auto mb-4 shadow-ocean-lg">
+            <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+            </svg>
           </div>
           <h1 className="text-3xl font-bold text-white mb-2">Verify Your Email</h1>
-          <p className="text-ocean-surface">
+          <p className="text-ocean-surface text-sm">
             We sent a verification code to
             <br />
-            <span className="font-medium">{email}</span>
+            <span className="font-semibold text-ocean-text">{email}</span>
           </p>
         </div>
 
         {/* Verification Form */}
-        <div className="card">
+        <div className="card animate-slideIn">
           {success ? (
-            <div className="text-center py-6">
-              <div className="w-16 h-16 bg-ocean-success/20 rounded-full flex items-center justify-center mx-auto mb-4">
+            <div className="text-center py-8 animate-fadeIn">
+              <div className="w-20 h-20 bg-ocean-success/20 rounded-full flex items-center justify-center mx-auto mb-4 animate-pulse-custom">
                 <svg
-                  className="w-8 h-8 text-ocean-success"
+                  className="w-10 h-10 text-ocean-success"
                   fill="none"
                   stroke="currentColor"
                   viewBox="0 0 24 24"
@@ -94,34 +96,39 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
                   <path
                     strokeLinecap="round"
                     strokeLinejoin="round"
-                    strokeWidth={2}
+                    strokeWidth={2.5}
                     d="M5 13l4 4L19 7"
                   />
                 </svg>
               </div>
               <h3 className="text-xl font-semibold text-ocean-success mb-2">Email Verified!</h3>
-              <p className="text-gray-400">Redirecting to login...</p>
+              <p className="text-ocean-surface">Redirecting to login...</p>
             </div>
           ) : (
             <form onSubmit={handleSubmit} className="space-y-5">
               {error && (
-                <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3">
-                  <p className="text-red-400 text-sm">{error}</p>
+                <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 animate-fadeIn">
+                  <div className="flex items-center space-x-2">
+                    <svg className="w-5 h-5 text-red-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <p className="text-red-400 text-sm">{error}</p>
+                  </div>
                 </div>
               )}
 
               <div className="bg-ocean-primary/10 border border-ocean-primary/30 rounded-lg p-4">
                 <div className="flex items-start space-x-3">
-                  <div className="flex-shrink-0">
-                    <svg className="w-6 h-6 text-ocean-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                  <div className="flex-shrink-0 mt-0.5">
+                    <svg className="w-5 h-5 text-ocean-surface" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                   </div>
                   <div className="flex-1">
-                    <h3 className="text-sm font-medium text-ocean-surface mb-1">
+                    <h3 className="text-sm font-semibold text-ocean-surface mb-1">
                       Check Your Email
                     </h3>
-                    <p className="text-xs text-gray-400">
+                    <p className="text-xs text-gray-400 leading-relaxed">
                       We sent a 6-digit verification code to your email address. Enter it below to verify your account.
                     </p>
                   </div>
@@ -129,28 +136,29 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-ocean-surface mb-2">
+                <label className="block text-sm font-semibold text-ocean-surface mb-2">
                   Verification Code
                 </label>
                 <input
                   type="text"
-                  className="input-field w-full text-center text-3xl tracking-[0.5em] font-mono"
-                  placeholder="000000"
+                  className="input-field w-full text-center text-2xl tracking-[0.75em] font-mono font-semibold placeholder:tracking-normal placeholder:text-base focus:ring-ocean-primary/30"
+                  placeholder="Enter 6-digit code"
                   value={code}
                   onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
                   required
                   disabled={loading}
                   maxLength={6}
                   autoComplete="off"
+                  autoFocus
                 />
-                <p className="text-xs text-gray-400 mt-1 text-center">
+                <p className="text-xs text-gray-400 mt-2 text-center">
                   Enter the 6-digit code from your email
                 </p>
               </div>
 
               <button
                 type="submit"
-                className="btn-primary w-full flex items-center justify-center"
+                className="btn-primary w-full flex items-center justify-center py-3 text-base font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-ocean-lg hover:shadow-ocean-xl"
                 disabled={loading || code.length !== 6}
               >
                 {loading ? (
@@ -159,45 +167,74 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
                     Verifying...
                   </>
                 ) : (
-                  'Verify Email'
+                  <>
+                    <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Verify Email
+                  </>
                 )}
               </button>
 
-              <div className="text-center pt-4 border-t border-ocean-container">
-                <p className="text-sm text-gray-400 mb-2">Didn&apos;t receive the code?</p>
+              <div className="text-center pt-4 border-t border-ocean-container/50">
+                <p className="text-sm text-gray-400 mb-3">Didn&apos;t receive the code?</p>
                 <button
                   type="button"
                   onClick={handleResend}
-                  className="text-sm text-ocean-surface hover:text-ocean-primary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="text-sm text-ocean-surface hover:text-ocean-primary transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed font-medium inline-flex items-center"
                   disabled={resending || cooldown > 0}
                 >
-                  {resending
-                    ? 'Sending...'
-                    : cooldown > 0
-                    ? `Resend in ${cooldown}s`
-                    : 'Resend Code'}
+                  {resending ? (
+                    <>
+                      <span className="spinner mr-2 !w-4 !h-4"></span>
+                      Sending...
+                    </>
+                  ) : cooldown > 0 ? (
+                    <>
+                      <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      Resend in {cooldown}s
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                      Resend Code
+                    </>
+                  )}
                 </button>
               </div>
             </form>
           )}
 
           {!success && (
-            <div className="mt-6 text-center">
+            <div className="mt-6 pt-6 border-t border-ocean-container/50 text-center">
               <button
                 onClick={onBack}
-                className="text-sm text-gray-400 hover:text-ocean-surface transition-colors"
+                className="text-sm text-gray-400 hover:text-ocean-surface transition-colors inline-flex items-center font-medium"
                 disabled={loading}
               >
-                ← Back to signup
+                <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                </svg>
+                Back to signup
               </button>
             </div>
           )}
         </div>
 
-        <div className="mt-6 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
-          <p className="text-xs text-yellow-400 text-center">
-            💡 <strong>Tip:</strong> Check your spam folder if you don&apos;t see the email
-          </p>
+        {/* Helpful Tip */}
+        <div className="mt-6 p-4 bg-ocean-warning/10 border border-ocean-warning/30 rounded-lg animate-fadeIn">
+          <div className="flex items-start space-x-3">
+            <svg className="w-5 h-5 text-ocean-warning flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+            </svg>
+            <p className="text-xs text-ocean-warning leading-relaxed">
+              <strong>Tip:</strong> Check your spam or junk folder if you don&apos;t see the email. The code expires in 10 minutes.
+            </p>
+          </div>
         </div>
       </div>
     </div>

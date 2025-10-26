@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import LogsViewer from './LogsViewer';
 
 const Dashboard = () => {
   const [metrics, setMetrics] = useState(null);
@@ -7,7 +8,7 @@ const Dashboard = () => {
   const [suggestions, setSuggestions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [selectedView, setSelectedView] = useState('overview'); // overview, cpu, memory, processes, storage
+  const [selectedView, setSelectedView] = useState('overview'); // overview, cpu, memory, processes, storage, logs
   const refreshInterval = 5000; // 5 seconds (reduced load)
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
@@ -20,6 +21,9 @@ const Dashboard = () => {
   const [showAllProcesses, setShowAllProcesses] = useState(false); // Show all processes or just top 20
   const [isRefreshingProcesses, setIsRefreshingProcesses] = useState(false);
   const [fileSizeFilter, setFileSizeFilter] = useState('large'); // 'large', 'small', or 'all'
+  const [processSearchTerm, setProcessSearchTerm] = useState(''); // Search filter for processes
+  const [optimizationResult, setOptimizationResult] = useState(null); // Store last optimization result
+  const resultsRef = useRef(null); // Reference to scroll to results
 
   // Fetch system metrics
   const fetchMetrics = async () => {
@@ -198,14 +202,31 @@ const Dashboard = () => {
   // Handle optimize button
   const handleOptimize = async () => {
     setIsOptimizing(true);
+    setOptimizationResult(null); // Clear previous results
     try {
       const result = await window.electronAPI.system.optimize();
       if (result.success) {
+        // Store the detailed results
+        setOptimizationResult(result.data);
         // Set to false BEFORE showing alert so button is enabled when alert closes
         setIsOptimizing(false);
-        alert(`Optimization complete!\n\nSpace saved: ${formatBytes(result.data.spaceSaved)}\nActions performed: ${result.data.actions.length}`);
         await fetchMetrics();
         await fetchSuggestions();
+        
+        // Scroll to results with smooth animation after a short delay
+        setTimeout(() => {
+          if (resultsRef.current) {
+            resultsRef.current.scrollIntoView({ 
+              behavior: 'smooth', 
+              block: 'start' 
+            });
+            // Add a pulse animation to draw attention
+            resultsRef.current.classList.add('pulse-attention');
+            setTimeout(() => {
+              resultsRef.current?.classList.remove('pulse-attention');
+            }, 2000);
+          }
+        }, 300);
       } else {
         setIsOptimizing(false);
         alert('Optimization failed: ' + result.error);
@@ -447,6 +468,16 @@ const Dashboard = () => {
         >
           Storage & Apps
         </button>
+        <button
+          onClick={() => setSelectedView('logs')}
+          className={`px-6 py-2 rounded-lg font-semibold transition-all duration-300 transform hover:scale-105 ${
+            selectedView === 'logs'
+              ? 'bg-[#FFC300] text-[#001D3D] shadow-lg'
+              : 'bg-[#003566] text-white hover:bg-[#004A7F]'
+          }`}
+        >
+          System Logs
+        </button>
       </div>
 
       {/* Overview View */}
@@ -593,6 +624,110 @@ const Dashboard = () => {
               )}
             </button>
           </div>
+
+          {/* Optimization Results */}
+          {optimizationResult && (
+            <div 
+              ref={resultsRef}
+              className="bg-gradient-to-br from-[#003566] to-[#001D3D] rounded-xl p-6 border-2 border-[#4CAF50] shadow-2xl animate-slideInDown"
+              style={{
+                animation: 'slideInDown 0.5s ease-out, pulse-glow 2s ease-in-out'
+              }}
+            >
+              {/* Attention Arrow - Points user to results */}
+              <div className="absolute -top-8 left-1/2 transform -translate-x-1/2 animate-bounce">
+                <div className="text-[#FFD60A] text-4xl">⬇️</div>
+                <div className="text-[#FFD60A] text-sm font-bold text-center mt-1">Results Below!</div>
+              </div>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-[#4CAF50] text-2xl font-bold flex items-center">
+                  ✅ Optimization Complete!
+                </h3>
+                <button
+                  onClick={() => setOptimizationResult(null)}
+                  className="text-gray-400 hover:text-white transition-colors"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Summary */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                <div className="bg-[#001D3D] rounded-lg p-4">
+                  <div className="text-[#48CAE4] text-sm mb-1">Total Space Freed</div>
+                  <div className="text-white text-3xl font-bold">{formatBytes(optimizationResult.spaceSaved)}</div>
+                </div>
+                <div className="bg-[#001D3D] rounded-lg p-4">
+                  <div className="text-[#48CAE4] text-sm mb-1">Actions Performed</div>
+                  <div className="text-white text-3xl font-bold">{optimizationResult.actions.length}</div>
+                </div>
+              </div>
+
+              {/* Detailed Actions */}
+              <div className="space-y-3">
+                <h4 className="text-[#FFC300] text-lg font-semibold mb-3">What Was Cleaned:</h4>
+                {optimizationResult.actions.map((action, index) => (
+                  <div 
+                    key={index} 
+                    className="bg-[#001D3D] rounded-lg p-4 border-l-4 border-[#48CAE4] transform transition-all duration-200 hover:scale-[1.02]"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center space-x-2 mb-2">
+                          <span className={`inline-flex items-center px-2 py-1 rounded text-xs font-bold ${
+                            action.status === 'success' 
+                              ? 'bg-[#4CAF50]/20 text-[#4CAF50] border border-[#4CAF50]/40'
+                              : action.status === 'error'
+                              ? 'bg-red-500/20 text-red-400 border border-red-500/40'
+                              : 'bg-gray-500/20 text-gray-400 border border-gray-500/40'
+                          }`}>
+                            {action.status === 'success' ? '✓' : action.status === 'error' ? '✗' : '○'} {action.status.toUpperCase()}
+                          </span>
+                          <span className="text-[#FFC300] font-semibold">{action.action}</span>
+                        </div>
+                        <div className="text-white text-sm">{action.message}</div>
+                        {action.filesDeleted && (
+                          <div className="text-[#48CAE4] text-xs mt-1">
+                            Files deleted: {action.filesDeleted}
+                          </div>
+                        )}
+                        {action.spaceSaved > 0 && (
+                          <div className="text-[#4CAF50] text-xs mt-1 font-semibold">
+                            💾 Saved: {formatBytes(action.spaceSaved)}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    {action.errors && action.errors.length > 0 && (
+                      <details className="mt-2">
+                        <summary className="text-gray-400 text-xs cursor-pointer hover:text-white">
+                          Show errors ({action.errors.length})
+                        </summary>
+                        <div className="mt-2 text-red-400 text-xs space-y-1 max-h-32 overflow-y-auto">
+                          {action.errors.slice(0, 5).map((err, i) => (
+                            <div key={i} className="ml-4">• {err}</div>
+                          ))}
+                          {action.errors.length > 5 && (
+                            <div className="ml-4 text-gray-500">... and {action.errors.length - 5} more</div>
+                          )}
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* Errors Summary (if any) */}
+              {optimizationResult.errors && optimizationResult.errors.length > 0 && (
+                <div className="mt-4 bg-red-500/10 border border-red-500/30 rounded-lg p-4">
+                  <div className="text-red-400 font-semibold mb-2">⚠️ Some issues occurred:</div>
+                  {optimizationResult.errors.map((error, index) => (
+                    <div key={index} className="text-red-300 text-sm ml-4">• {error}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -708,7 +843,7 @@ const Dashboard = () => {
       {/* Processes View */}
       {selectedView === 'processes' && (
         <div className="bg-[#003566] rounded-lg p-6 border-2 border-[#0077B6] animate-fadeIn">
-          <div className="flex justify-between items-center mb-6">
+          <div className="flex justify-between items-center mb-4">
             <h3 className="text-[#FFC300] text-2xl font-bold">
               Running Processes {processes.length > 0 && (showAllProcesses ? `(All ${processes.length})` : `(Top 20 of ${processes.length})`)}
             </h3>
@@ -740,6 +875,27 @@ const Dashboard = () => {
               </button>
             </div>
           </div>
+
+          {/* Search Filter */}
+          <div className="mb-4">
+            <input
+              type="text"
+              placeholder="🔍 Search processes (e.g., VS Code, Chrome, electron)..."
+              value={processSearchTerm}
+              onChange={(e) => setProcessSearchTerm(e.target.value)}
+              className="w-full px-4 py-2 bg-[#001D3D] border border-[#48CAE4]/30 text-white placeholder-gray-400 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#48CAE4] transition-all duration-150"
+            />
+            {processSearchTerm && (
+              <div className="mt-2 text-[#48CAE4] text-sm">
+                Found {processes.filter(p => {
+                  const searchLower = processSearchTerm.toLowerCase();
+                  const nameMatch = p.name && p.name.toLowerCase().includes(searchLower);
+                  const commandMatch = p.command && p.command.toLowerCase().includes(searchLower);
+                  return nameMatch || commandMatch;
+                }).length} matching processes
+              </div>
+            )}
+          </div>
           
           {isRefreshingProcesses && processes.length === 0 ? (
             <div className="text-center py-8">
@@ -760,23 +916,40 @@ const Dashboard = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {(showAllProcesses ? processes : processes.slice(0, 20)).map((proc) => (
-                    <tr key={proc.pid} className="border-b border-[#0077B6] hover:bg-[#001D3D] transition-colors duration-200">
-                      <td className="py-2 px-4">{proc.pid}</td>
-                      <td className="py-2 px-4 max-w-xs truncate">{proc.name}</td>
-                      <td className="py-2 px-4 text-right">{proc.cpu}</td>
-                      <td className="py-2 px-4 text-right">{formatBytes(proc.memory)}</td>
-                      <td className="py-2 px-4 text-right">{proc.memoryPercent}</td>
-                      <td className="py-2 px-4 text-center">
-                        <button
-                          onClick={() => handleEndProcess(proc.pid, proc.name)}
-                          className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm transition-all duration-300 transform hover:scale-110"
-                        >
-                          End Task
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {(() => {
+                    // Filter processes based on search term (check both name and command)
+                    const filteredProcesses = processSearchTerm
+                      ? processes.filter(p => {
+                          const searchLower = processSearchTerm.toLowerCase();
+                          const nameMatch = p.name && p.name.toLowerCase().includes(searchLower);
+                          const commandMatch = p.command && p.command.toLowerCase().includes(searchLower);
+                          return nameMatch || commandMatch;
+                        })
+                      : processes;
+                    
+                    // Show top 20 or all based on toggle (unless searching)
+                    const displayProcesses = processSearchTerm 
+                      ? filteredProcesses 
+                      : (showAllProcesses ? filteredProcesses : filteredProcesses.slice(0, 20));
+                    
+                    return displayProcesses.map((proc) => (
+                      <tr key={proc.pid} className="border-b border-[#0077B6] hover:bg-[#001D3D] transition-colors duration-200">
+                        <td className="py-2 px-4">{proc.pid}</td>
+                        <td className="py-2 px-4 max-w-xs truncate">{proc.name}</td>
+                        <td className="py-2 px-4 text-right">{proc.cpu}</td>
+                        <td className="py-2 px-4 text-right">{formatBytes(proc.memory)}</td>
+                        <td className="py-2 px-4 text-right">{proc.memoryPercent}</td>
+                        <td className="py-2 px-4 text-center">
+                          <button
+                            onClick={() => handleEndProcess(proc.pid, proc.name)}
+                            className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm transition-all duration-300 transform hover:scale-110"
+                          >
+                            End Task
+                          </button>
+                        </td>
+                      </tr>
+                    ));
+                  })()}
                 </tbody>
               </table>
             </div>
@@ -1105,6 +1278,13 @@ const Dashboard = () => {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Logs View */}
+      {selectedView === 'logs' && (
+        <div className="animate-fadeIn">
+          <LogsViewer />
         </div>
       )}
     </div>

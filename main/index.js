@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 const Store = require('electron-store');
 const db = require('./services/database');
@@ -6,6 +6,10 @@ const firebase = require('./services/firebase');
 const emailService = require('./services/emailService');
 const monitoringService = require('./services/monitoring');
 const optimizerService = require('./services/optimizer');
+const LogsService = require('./services/logsService');
+
+// Initialize services
+let logsService;
 
 // Initialize electron-store for secure configuration
 const store = new Store();
@@ -42,29 +46,54 @@ function createWindow() {
       contextIsolation: true, // Security: enable context isolation
       enableRemoteModule: false, // Security: disable remote module
       preload: path.join(__dirname, 'preload.js'),
-      webSecurity: true,
-      cache: false, // Disable cache in development
+      webSecurity: true, // Keep security enabled
+      allowRunningInsecureContent: false, // Security: block insecure content
+      devTools: true,
     },
     icon: path.join(__dirname, '../assets/icons/icon.png'),
     show: false, // Don't show until ready-to-show
   });
 
-  // Set Content Security Policy
+  // Set Content Security Policy for both dev and production
   mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+    const isDev = process.env.NODE_ENV === 'development';
+    const csp = isDev
+      ? [
+          // Development CSP - allow Vite dev server and HMR
+          "default-src 'self' http://localhost:5173 ws://localhost:5173; " +
+          "script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5173; " +
+          "style-src 'self' 'unsafe-inline' http://localhost:5173; " +
+          "img-src 'self' data: http://localhost:5173; " +
+          "font-src 'self' data: http://localhost:5173; " +
+          "connect-src 'self' http://localhost:5173 ws://localhost:5173 https://*.googleapis.com https://*.firebaseio.com;",
+        ]
+      : [
+          // Production CSP - stricter
+          "default-src 'self'; " +
+          "script-src 'self' 'unsafe-inline'; " +
+          "style-src 'self' 'unsafe-inline'; " +
+          "img-src 'self' data:; " +
+          "font-src 'self' data:; " +
+          "connect-src 'self' https://*.googleapis.com https://*.firebaseio.com;",
+        ];
+
     callback({
       responseHeaders: {
         ...details.responseHeaders,
-        'Content-Security-Policy': [
-          process.env.NODE_ENV === 'development'
-            ? "default-src * 'unsafe-inline' 'unsafe-eval'; script-src * 'unsafe-inline' 'unsafe-eval'; connect-src * 'unsafe-inline'; img-src * data: blob: 'unsafe-inline'; frame-src *; style-src * 'unsafe-inline';"
-            : "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:;",
-        ],
+        'Content-Security-Policy': csp,
       },
     });
   });
 
   // Load the renderer
   if (process.env.NODE_ENV === 'development') {
+    // Clear cache on development startup to prevent ERR_CACHE_READ_FAILURE
+    mainWindow.webContents.session.clearCache().then(() => {
+      console.log('Cache cleared successfully');
+    }).catch((err) => {
+      console.warn('Failed to clear cache:', err);
+    });
+    
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
   } else {
@@ -98,6 +127,14 @@ app.whenReady().then(async () => {
     
     emailService.initialize();
     console.log('Email service initialized');
+    
+    // Initialize logs service
+    logsService = new LogsService(db);
+    await logsService.initialize();
+    console.log('Logs service initialized');
+    
+    // Schedule automatic log cleanup (30 days retention)
+    logsService.scheduleCleanup(30);
   } catch (error) {
     console.error('Failed to initialize services:', error);
   }
@@ -163,15 +200,9 @@ ipcMain.handle('auth:signup', async (event, { email, password }) => {
   }
 });
 
-ipcMain.handle('auth:verify-email', async (_event, { code }) => {
+ipcMain.handle('auth:verify-email', async (_event, { email, code }) => {
   try {
-    // Get current user to get UID
-    const user = firebase.getCurrentUser();
-    if (!user) {
-      return { success: false, error: 'No user session found' };
-    }
-
-    const result = await firebase.verifyEmail(user.uid, code);
+    const result = await firebase.verifyEmail(email, code);
     return result;
   } catch (error) {
     return { success: false, error: error.message };
@@ -187,15 +218,9 @@ ipcMain.handle('auth:check-email-verified', async () => {
   }
 });
 
-ipcMain.handle('auth:resend-code', async () => {
+ipcMain.handle('auth:resend-code', async (_event, { email }) => {
   try {
-    // Get current user to get UID
-    const user = firebase.getCurrentUser();
-    if (!user) {
-      return { success: false, error: 'No user session found' };
-    }
-
-    const result = await firebase.resendVerificationCode(user.uid, user.email);
+    const result = await firebase.resendVerificationByEmail(email);
     return result;
   } catch (error) {
     return { success: false, error: error.message };
@@ -522,6 +547,131 @@ ipcMain.handle('system:delete-folder', async (_event, { folderPath }) => {
     return { success: true, message: 'Folder moved to Recycle Bin' };
   } catch (error) {
     console.error('Error deleting folder:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ============================================================================
+// Logs IPC Handlers
+// ============================================================================
+
+// Get filtered logs with pagination
+ipcMain.handle('logs:getFiltered', async (_event, filters, page, pageSize) => {
+  try {
+    const result = db.getLogsFiltered(filters, page, pageSize);
+    return result;
+  } catch (error) {
+    console.error('Error getting filtered logs:', error);
+    return { logs: [], total: 0, page: 1, pageSize, totalPages: 0 };
+  }
+});
+
+// Get available log types
+ipcMain.handle('logs:getTypes', async () => {
+  try {
+    return db.getLogTypes();
+  } catch (error) {
+    console.error('Error getting log types:', error);
+    return [];
+  }
+});
+
+// Export logs to CSV
+ipcMain.handle('logs:exportCSV', async (_event, filters) => {
+  try {
+    const result = await logsService.exportToCSV(filters);
+    return result;
+  } catch (error) {
+    console.error('Error exporting logs to CSV:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Export logs to JSON
+ipcMain.handle('logs:exportJSON', async (_event, filters) => {
+  try {
+    const result = await logsService.exportToJSON(filters);
+    return result;
+  } catch (error) {
+    console.error('Error exporting logs to JSON:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Export logs to XML
+ipcMain.handle('logs:exportXML', async (_event, filters) => {
+  try {
+    const result = await logsService.exportToXML(filters);
+    return result;
+  } catch (error) {
+    console.error('Error exporting logs to XML:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Export logs to TXT
+ipcMain.handle('logs:exportTXT', async (_event, filters) => {
+  try {
+    const result = await logsService.exportToTXT(filters);
+    return result;
+  } catch (error) {
+    console.error('Error exporting logs to TXT:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Export logs to HTML
+ipcMain.handle('logs:exportHTML', async (_event, filters) => {
+  try {
+    const result = await logsService.exportToHTML(filters);
+    return result;
+  } catch (error) {
+    console.error('Error exporting logs to HTML:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Export logs to Markdown
+ipcMain.handle('logs:exportMarkdown', async (_event, filters) => {
+  try {
+    const result = await logsService.exportToMarkdown(filters);
+    return result;
+  } catch (error) {
+    console.error('Error exporting logs to Markdown:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Export diagnostic package
+ipcMain.handle('logs:exportDiagnostic', async (_event, filters) => {
+  try {
+    const result = await logsService.exportDiagnosticZIP(filters);
+    return result;
+  } catch (error) {
+    console.error('Error exporting diagnostic package:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Open export folder
+ipcMain.handle('logs:openExportFolder', async () => {
+  try {
+    const exportDir = logsService.getExportDir();
+    await shell.openPath(exportDir);
+    return { success: true };
+  } catch (error) {
+    console.error('Error opening export folder:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Manually trigger log cleanup
+ipcMain.handle('logs:cleanup', async (_event, retentionDays) => {
+  try {
+    const result = db.cleanupOldLogs(retentionDays);
+    return result;
+  } catch (error) {
+    console.error('Error cleaning up logs:', error);
     return { success: false, error: error.message };
   }
 });

@@ -167,7 +167,7 @@ class MonitoringService {
           }
           return parseFloat(b.cpu) - parseFloat(a.cpu);
         })
-        .slice(0, 100); // Top 100 processes
+        .slice(0, 500); // Top 500 processes (increased from 100 for better visibility)
 
       console.log(`Process list retrieved: ${detailedProcesses.length} processes`);
       return detailedProcesses;

@@ -97,11 +97,35 @@ class DatabaseService {
       CREATE TABLE IF NOT EXISTS logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         type TEXT NOT NULL,
+        level TEXT DEFAULT 'info',
         message TEXT NOT NULL,
         metadata TEXT,
         timestamp INTEGER DEFAULT (strftime('%s', 'now'))
       )
     `);
+    
+    // Migrate existing logs table to add level column if it doesn't exist
+    try {
+      // Check if level column exists
+      const checkStmt = this.db.prepare("PRAGMA table_info(logs)");
+      let hasLevelColumn = false;
+      while (checkStmt.step()) {
+        const row = checkStmt.getAsObject();
+        if (row.name === 'level') {
+          hasLevelColumn = true;
+          break;
+        }
+      }
+      checkStmt.free();
+      
+      // Add level column if it doesn't exist
+      if (!hasLevelColumn) {
+        console.log('Migrating logs table: adding level column');
+        this.db.exec(`ALTER TABLE logs ADD COLUMN level TEXT DEFAULT 'info'`);
+      }
+    } catch (error) {
+      console.warn('Migration check for logs table:', error.message);
+    }
 
     // Backups table
     this.db.exec(`
@@ -133,6 +157,7 @@ class DatabaseService {
     // Create indexes for better performance
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_user_email ON user(email)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_type ON logs(type)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_backups_created ON backups(created_at)`);
     
@@ -140,12 +165,34 @@ class DatabaseService {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS verification_codes (
         uid TEXT PRIMARY KEY,
+        email TEXT,
         code TEXT NOT NULL,
         expires_at INTEGER NOT NULL,
         verified INTEGER DEFAULT 0,
         created_at INTEGER DEFAULT (strftime('%s', 'now'))
       )
     `);
+    
+    // Add email column if it doesn't exist (migration for existing databases)
+    try {
+      const checkStmt = this.db.prepare("PRAGMA table_info(verification_codes)");
+      let hasEmailColumn = false;
+      while (checkStmt.step()) {
+        const row = checkStmt.getAsObject();
+        if (row.name === 'email') {
+          hasEmailColumn = true;
+          break;
+        }
+      }
+      checkStmt.free();
+      
+      if (!hasEmailColumn) {
+        console.log('Adding email column to verification_codes table...');
+        this.db.exec('ALTER TABLE verification_codes ADD COLUMN email TEXT');
+      }
+    } catch (error) {
+      console.log('Email column migration check completed');
+    }
     
     this.saveDatabase();
   }
@@ -185,13 +232,91 @@ class DatabaseService {
     return { success: true };
   }
 
-  setVerificationCode(email, code, expiresAt) {
-    const stmt = this.db.prepare(
-      'UPDATE user SET verification_code = ?, verification_expires = ? WHERE email = ?'
-    );
-    stmt.bind([code, expiresAt, email]);
-    stmt.step();
-    stmt.free();
+  setVerificationCode(identifier, code, expiresAt) {
+    // identifier can be email or uid
+    // First, try to find user by email
+    let user = this.getUserByEmail(identifier);
+    
+    if (!user) {
+      // Try to get user from verification_codes table by uid
+      const stmt = this.db.prepare('SELECT * FROM verification_codes WHERE uid = ?');
+      stmt.bind([identifier]);
+      if (stmt.step()) {
+        const row = stmt.getAsObject();
+        stmt.free();
+        // Update verification_codes table
+        const updateStmt = this.db.prepare(
+          'UPDATE verification_codes SET code = ?, expires_at = ? WHERE uid = ?'
+        );
+        updateStmt.bind([code, expiresAt, identifier]);
+        updateStmt.step();
+        updateStmt.free();
+        this.saveDatabase();
+        return { success: true };
+      }
+      stmt.free();
+    } else {
+      // Update user table
+      const stmt = this.db.prepare(
+        'UPDATE user SET verification_code = ?, verification_expires = ? WHERE email = ?'
+      );
+      stmt.bind([code, expiresAt, identifier]);
+      stmt.step();
+      stmt.free();
+      
+      // Also insert/update in verification_codes table for consistency
+      const checkStmt = this.db.prepare('SELECT * FROM verification_codes WHERE uid = ?');
+      checkStmt.bind([identifier]);
+      if (checkStmt.step()) {
+        checkStmt.free();
+        const updateStmt = this.db.prepare(
+          'UPDATE verification_codes SET code = ?, expires_at = ? WHERE uid = ?'
+        );
+        updateStmt.bind([code, expiresAt, identifier]);
+        updateStmt.step();
+        updateStmt.free();
+      } else {
+        checkStmt.free();
+        const insertStmt = this.db.prepare(
+          'INSERT INTO verification_codes (uid, code, expires_at, verified) VALUES (?, ?, ?, 0)'
+        );
+        insertStmt.bind([identifier, code, expiresAt]);
+        insertStmt.step();
+        insertStmt.free();
+      }
+      
+      this.saveDatabase();
+      return { success: true };
+    }
+    
+    return { success: false, error: 'User not found' };
+  }
+
+  setVerificationCodeForFirebase(uid, email, code, expiresAt) {
+    // For Firebase users, directly insert/update in verification_codes table
+    const checkStmt = this.db.prepare('SELECT * FROM verification_codes WHERE uid = ?');
+    checkStmt.bind([uid]);
+    
+    if (checkStmt.step()) {
+      // Update existing
+      checkStmt.free();
+      const updateStmt = this.db.prepare(
+        'UPDATE verification_codes SET email = ?, code = ?, expires_at = ?, verified = 0 WHERE uid = ?'
+      );
+      updateStmt.bind([email, code, expiresAt, uid]);
+      updateStmt.step();
+      updateStmt.free();
+    } else {
+      // Insert new
+      checkStmt.free();
+      const insertStmt = this.db.prepare(
+        'INSERT INTO verification_codes (uid, email, code, expires_at, verified) VALUES (?, ?, ?, ?, 0)'
+      );
+      insertStmt.bind([uid, email, code, expiresAt]);
+      insertStmt.step();
+      insertStmt.free();
+    }
+    
     this.saveDatabase();
     return { success: true };
   }
@@ -287,30 +412,88 @@ class DatabaseService {
     return { success: true };
   }
 
-  getVerificationCode(uid) {
-    const stmt = this.db.prepare('SELECT * FROM verification_codes WHERE uid = ?');
-    stmt.bind([uid]);
+  getVerificationCode(identifier) {
+    console.log(`🔍 Getting verification code for identifier: ${identifier}`);
+    
+    // Try to get from user table first (local mode uses email)
+    const user = this.getUserByEmail(identifier);
+    if (user && user.verification_code) {
+      console.log('✓ Found in user table (local mode)');
+      return {
+        code: user.verification_code,
+        expires_at: user.verification_expires,
+        verified: user.verified
+      };
+    }
+    
+    // Try verification_codes table by uid (Firebase mode uses uid)
+    let stmt = this.db.prepare('SELECT * FROM verification_codes WHERE uid = ?');
+    stmt.bind([identifier]);
     if (stmt.step()) {
       const row = stmt.getAsObject();
       stmt.free();
+      console.log('✓ Found in verification_codes table by UID');
       return row;
     }
     stmt.free();
+    
+    // Try verification_codes table by email (for Firebase users)
+    stmt = this.db.prepare('SELECT * FROM verification_codes WHERE email = ?');
+    stmt.bind([identifier]);
+    if (stmt.step()) {
+      const row = stmt.getAsObject();
+      stmt.free();
+      console.log('✓ Found in verification_codes table by EMAIL');
+      return row;
+    }
+    stmt.free();
+    
+    console.log('❌ No verification code found');
     return null;
   }
 
-  markEmailAsVerified(uid) {
-    const stmt = this.db.prepare('UPDATE verification_codes SET verified = 1 WHERE uid = ?');
-    stmt.bind([uid]);
-    stmt.step();
-    stmt.free();
+  markEmailAsVerified(identifier) {
+    console.log(`✅ Marking as verified for identifier: ${identifier}`);
+    
+    // Update user table (local mode)
+    const user = this.getUserByEmail(identifier);
+    if (user) {
+      const stmt = this.db.prepare(
+        'UPDATE user SET verified = 1, verification_code = NULL, verification_expires = NULL WHERE email = ?'
+      );
+      stmt.bind([identifier]);
+      stmt.step();
+      stmt.free();
+      console.log('✓ Updated user table');
+    }
+    
+    // Update verification_codes table by UID (Firebase mode)
+    let stmt2 = this.db.prepare('UPDATE verification_codes SET verified = 1 WHERE uid = ?');
+    stmt2.bind([identifier]);
+    stmt2.step();
+    stmt2.free();
+    
+    // Also try by email (Firebase mode)
+    stmt2 = this.db.prepare('UPDATE verification_codes SET verified = 1 WHERE email = ?');
+    stmt2.bind([identifier]);
+    stmt2.step();
+    stmt2.free();
+    console.log('✓ Updated verification_codes table');
+    
     this.saveDatabase();
     return { success: true };
   }
 
-  isEmailVerified(uid) {
+  isEmailVerified(identifier) {
+    // Check user table first (local mode uses email)
+    const user = this.getUserByEmail(identifier);
+    if (user) {
+      return user.verified === 1;
+    }
+    
+    // Check verification_codes table (Firebase mode uses uid)
     const stmt = this.db.prepare('SELECT verified FROM verification_codes WHERE uid = ?');
-    stmt.bind([uid]);
+    stmt.bind([identifier]);
     if (stmt.step()) {
       const row = stmt.getAsObject();
       stmt.free();
@@ -416,11 +599,11 @@ class DatabaseService {
   /**
    * Logs operations
    */
-  addLog(type, message, metadata = null) {
+  addLog(type, message, metadata = null, level = 'info') {
     const stmt = this.db.prepare(
-      'INSERT INTO logs (type, message, metadata) VALUES (?, ?, ?)'
+      'INSERT INTO logs (type, level, message, metadata) VALUES (?, ?, ?, ?)'
     );
-    stmt.bind([type, message, metadata ? JSON.stringify(metadata) : null]);
+    stmt.bind([type, level, message, metadata ? JSON.stringify(metadata) : null]);
     stmt.step();
     stmt.free();
     this.saveDatabase();
@@ -438,6 +621,153 @@ class DatabaseService {
 
     query += ' ORDER BY timestamp DESC LIMIT ?';
     params.push(limit);
+
+    const stmt = this.db.prepare(query);
+    stmt.bind(params);
+    const results = [];
+    while (stmt.step()) {
+      results.push(stmt.getAsObject());
+    }
+    stmt.free();
+    return results;
+  }
+
+  /**
+   * Enhanced logs filtering with pagination
+   * @param {Object} filters - { level, type, searchText, startDate, endDate }
+   * @param {Number} page - Page number (1-indexed)
+   * @param {Number} pageSize - Items per page
+   */
+  getLogsFiltered(filters = {}, page = 1, pageSize = 50) {
+    let query = 'SELECT * FROM logs WHERE 1=1';
+    const params = [];
+
+    // Level filter
+    if (filters.level && filters.level !== 'all') {
+      query += ' AND level = ?';
+      params.push(filters.level);
+    }
+
+    // Type/Module filter
+    if (filters.type) {
+      query += ' AND type = ?';
+      params.push(filters.type);
+    }
+
+    // Search text filter
+    if (filters.searchText) {
+      query += ' AND message LIKE ?';
+      params.push(`%${filters.searchText}%`);
+    }
+
+    // Date range filters
+    if (filters.startDate) {
+      query += ' AND timestamp >= ?';
+      params.push(Math.floor(filters.startDate / 1000));
+    }
+
+    if (filters.endDate) {
+      query += ' AND timestamp <= ?';
+      params.push(Math.floor(filters.endDate / 1000));
+    }
+
+    // Count total results
+    const countQuery = query.replace('SELECT *', 'SELECT COUNT(*) as total');
+    const countStmt = this.db.prepare(countQuery);
+    countStmt.bind(params);
+    let total = 0;
+    if (countStmt.step()) {
+      total = countStmt.getAsObject().total;
+    }
+    countStmt.free();
+
+    // Add pagination
+    query += ' ORDER BY timestamp DESC LIMIT ? OFFSET ?';
+    const offset = (page - 1) * pageSize;
+    params.push(pageSize, offset);
+
+    const stmt = this.db.prepare(query);
+    stmt.bind(params);
+    const results = [];
+    while (stmt.step()) {
+      results.push(stmt.getAsObject());
+    }
+    stmt.free();
+
+    return {
+      logs: results,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize)
+    };
+  }
+
+  /**
+   * Get unique log types/modules
+   */
+  getLogTypes() {
+    const query = 'SELECT DISTINCT type FROM logs ORDER BY type';
+    const stmt = this.db.prepare(query);
+    const results = [];
+    while (stmt.step()) {
+      results.push(stmt.getAsObject().type);
+    }
+    stmt.free();
+    return results;
+  }
+
+  /**
+   * Clean up old logs (retention policy)
+   * @param {Number} retentionDays - Days to keep logs
+   */
+  cleanupOldLogs(retentionDays = 30) {
+    const cutoffTimestamp = Math.floor((Date.now() - retentionDays * 24 * 60 * 60 * 1000) / 1000);
+    const stmt = this.db.prepare('DELETE FROM logs WHERE timestamp < ?');
+    stmt.bind([cutoffTimestamp]);
+    stmt.step();
+    stmt.free();
+    this.saveDatabase();
+    
+    // Log the cleanup action
+    this.addLog('system', `Cleaned up logs older than ${retentionDays} days`, null, 'info');
+    return { success: true };
+  }
+
+  /**
+   * Export logs to structured format
+   * @param {Object} filters - Same as getLogsFiltered
+   */
+  exportLogs(filters = {}) {
+    let query = 'SELECT * FROM logs WHERE 1=1';
+    const params = [];
+
+    if (filters.level && filters.level !== 'all') {
+      query += ' AND level = ?';
+      params.push(filters.level);
+    }
+
+    if (filters.type) {
+      query += ' AND type = ?';
+      params.push(filters.type);
+    }
+
+    if (filters.searchText) {
+      query += ' AND message LIKE ?';
+      params.push(`%${filters.searchText}%`);
+    }
+
+    if (filters.startDate) {
+      query += ' AND timestamp >= ?';
+      params.push(Math.floor(filters.startDate / 1000));
+    }
+
+    if (filters.endDate) {
+      query += ' AND timestamp <= ?';
+      params.push(Math.floor(filters.endDate / 1000));
+    }
+
+    query += ' ORDER BY timestamp DESC';
 
     const stmt = this.db.prepare(query);
     stmt.bind(params);

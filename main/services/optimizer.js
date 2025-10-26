@@ -118,7 +118,8 @@ class OptimizerService {
       action: 'Clear App Cache',
       status: 'pending',
       spaceSaved: 0,
-      message: ''
+      filesDeleted: 0,
+      errors: []
     };
 
     try {
@@ -126,11 +127,39 @@ class OptimizerService {
       const cachePath = app.getPath('cache');
       
       if (await fs.pathExists(cachePath)) {
-        const sizeBefore = await this.getDirectorySize(cachePath);
-        await fs.emptyDir(cachePath);
-        result.spaceSaved = sizeBefore;
-        result.status = 'success';
-        result.message = `Cleared app cache, freed ${this.formatBytes(sizeBefore)}`;
+        const files = await fs.readdir(cachePath);
+        let totalSize = 0;
+
+        // Try to delete files individually, skipping locked ones
+        for (const file of files) {
+          try {
+            const filePath = path.join(cachePath, file);
+            const stats = await fs.stat(filePath);
+            
+            // Skip if it's the app's own cache directory that might be locked
+            if (file.includes('fortimorph-desktop') || file.includes('SharedStorage')) {
+              result.errors.push(`Skipped ${file} (in use by application)`);
+              continue;
+            }
+
+            const size = stats.isDirectory() 
+              ? await this.getDirectorySize(filePath)
+              : stats.size;
+            
+            await fs.remove(filePath);
+            totalSize += size;
+            result.filesDeleted++;
+          } catch (err) {
+            // Skip files that are in use or locked
+            result.errors.push(`Skipped ${file}: ${err.message}`);
+          }
+        }
+
+        result.spaceSaved = totalSize;
+        result.status = totalSize > 0 ? 'success' : 'warning';
+        result.message = totalSize > 0 
+          ? `Cleared ${result.filesDeleted} cache items, freed ${this.formatBytes(totalSize)}`
+          : 'Some cache files are in use and cannot be deleted';
       } else {
         result.status = 'success';
         result.message = 'No cache to clear';
