@@ -7,6 +7,8 @@ class DatabaseService {
   constructor() {
     this.db = null;
     this.dbPath = path.join(app.getPath('userData'), 'fortimorph.db');
+    this.saveTimer = null;
+    this.saveDebounceMs = 1000; // Debounce database saves for 1 second
   }
 
   /**
@@ -48,9 +50,35 @@ class DatabaseService {
   }
 
   /**
-   * Save database to file
+   * Save database to file (debounced for performance)
    */
   saveDatabase() {
+    // Clear existing timer
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+    }
+    
+    // Debounce the save operation
+    this.saveTimer = setTimeout(() => {
+      try {
+        const data = this.db.export();
+        const buffer = Buffer.from(data);
+        fs.writeFileSync(this.dbPath, buffer);
+      } catch (error) {
+        console.error('Error saving database:', error);
+      }
+    }, this.saveDebounceMs);
+  }
+
+  /**
+   * Force immediate database save (use sparingly)
+   */
+  saveDatabaseImmediate() {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    
     try {
       const data = this.db.export();
       const buffer = Buffer.from(data);
@@ -109,11 +137,14 @@ class DatabaseService {
       // Check if level column exists
       const checkStmt = this.db.prepare("PRAGMA table_info(logs)");
       let hasLevelColumn = false;
+      let hasUserIdColumn = false;
       while (checkStmt.step()) {
         const row = checkStmt.getAsObject();
         if (row.name === 'level') {
           hasLevelColumn = true;
-          break;
+        }
+        if (row.name === 'user_id') {
+          hasUserIdColumn = true;
         }
       }
       checkStmt.free();
@@ -122,6 +153,12 @@ class DatabaseService {
       if (!hasLevelColumn) {
         console.log('Migrating logs table: adding level column');
         this.db.exec(`ALTER TABLE logs ADD COLUMN level TEXT DEFAULT 'info'`);
+      }
+      
+      // Add user_id column if it doesn't exist
+      if (!hasUserIdColumn) {
+        console.log('Migrating logs table: adding user_id column');
+        this.db.exec(`ALTER TABLE logs ADD COLUMN user_id TEXT`);
       }
     } catch (error) {
       console.warn('Migration check for logs table:', error.message);
@@ -159,7 +196,24 @@ class DatabaseService {
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_type ON logs(type)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_user_id ON logs(user_id)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_backups_created ON backups(created_at)`);
+    
+    // Create Firebase users cache table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS firebase_users_cache (
+        uid TEXT PRIMARY KEY,
+        email TEXT NOT NULL,
+        display_name TEXT,
+        photo_url TEXT,
+        email_verified INTEGER DEFAULT 0,
+        created_at INTEGER,
+        last_login INTEGER,
+        last_sync INTEGER DEFAULT (strftime('%s', 'now'))
+      )
+    `);
+    
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_firebase_users_email ON firebase_users_cache(email)`);
     
     // Create verification codes table
     this.db.exec(`
@@ -438,17 +492,18 @@ class DatabaseService {
     stmt.free();
     
     // Try verification_codes table by email (for Firebase users)
-    stmt = this.db.prepare('SELECT * FROM verification_codes WHERE email = ?');
+    // Get the NEWEST code by created_at timestamp
+    stmt = this.db.prepare('SELECT * FROM verification_codes WHERE email = ? ORDER BY created_at DESC LIMIT 1');
     stmt.bind([identifier]);
     if (stmt.step()) {
       const row = stmt.getAsObject();
       stmt.free();
-      console.log('✓ Found in verification_codes table by EMAIL');
+      console.log('✓ Found in verification_codes table by EMAIL (newest)');
       return row;
     }
     stmt.free();
     
-    console.log('❌ No verification code found');
+    console.log('✗ No verification code found');
     return null;
   }
 
@@ -504,6 +559,91 @@ class DatabaseService {
     return false;
   }
 
+  /**
+   * Firebase Users Cache operations
+   */
+  syncFirebaseUserToLocal(firebaseUser) {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT OR REPLACE INTO firebase_users_cache 
+        (uid, email, display_name, photo_url, email_verified, created_at, last_login, last_sync) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      
+      const now = Math.floor(Date.now() / 1000);
+      const createdAt = firebaseUser.metadata?.creationTime 
+        ? Math.floor(new Date(firebaseUser.metadata.creationTime).getTime() / 1000)
+        : now;
+      const lastLogin = firebaseUser.metadata?.lastSignInTime
+        ? Math.floor(new Date(firebaseUser.metadata.lastSignInTime).getTime() / 1000)
+        : now;
+      
+      stmt.bind([
+        firebaseUser.uid,
+        firebaseUser.email,
+        firebaseUser.displayName || null,
+        firebaseUser.photoURL || null,
+        firebaseUser.emailVerified ? 1 : 0,
+        createdAt,
+        lastLogin,
+        now
+      ]);
+      stmt.step();
+      stmt.free();
+      this.saveDatabase();
+      
+      console.log(`✅ Synced Firebase user to local cache: ${firebaseUser.email}`);
+      return { success: true };
+    } catch (error) {
+      console.error('Error syncing Firebase user to local:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  getFirebaseUserFromCache(uid) {
+    const stmt = this.db.prepare('SELECT * FROM firebase_users_cache WHERE uid = ?');
+    stmt.bind([uid]);
+    if (stmt.step()) {
+      const row = stmt.getAsObject();
+      stmt.free();
+      return row;
+    }
+    stmt.free();
+    return null;
+  }
+
+  getFirebaseUserByEmail(email) {
+    const stmt = this.db.prepare('SELECT * FROM firebase_users_cache WHERE email = ?');
+    stmt.bind([email]);
+    if (stmt.step()) {
+      const row = stmt.getAsObject();
+      stmt.free();
+      return row;
+    }
+    stmt.free();
+    return null;
+  }
+
+  getAllFirebaseUsers() {
+    const users = [];
+    const stmt = this.db.prepare('SELECT * FROM firebase_users_cache ORDER BY last_login DESC');
+    while (stmt.step()) {
+      users.push(stmt.getAsObject());
+    }
+    stmt.free();
+    return users;
+  }
+
+  updateFirebaseUserLastLogin(uid) {
+    const now = Math.floor(Date.now() / 1000);
+    const stmt = this.db.prepare('UPDATE firebase_users_cache SET last_login = ?, last_sync = ? WHERE uid = ?');
+    stmt.bind([now, now, uid]);
+    stmt.step();
+    stmt.free();
+    this.saveDatabase();
+    return { success: true };
+  }
+
   // Admin/Debug methods
   getAllUsers() {
     const users = [];
@@ -557,6 +697,88 @@ class DatabaseService {
   }
 
   /**
+   * Delete user data from local database
+   * @param {String} uid - User ID (Firebase UID or local_XX)
+   * @param {Object} options - Deletion options
+   * @param {Boolean} options.deleteLogs - Whether to delete user's logs (default: true)
+   * @param {Boolean} options.anonymizeLogs - Anonymize logs instead of deleting (default: false)
+   */
+  deleteUserData(uid, options = {}) {
+    try {
+      const { deleteLogs = true, anonymizeLogs = false } = options;
+      
+      console.log(`🗑️ Deleting user data for UID: ${uid}`);
+      
+      // Delete from firebase_users_cache
+      let stmt = this.db.prepare('DELETE FROM firebase_users_cache WHERE uid = ?');
+      stmt.bind([uid]);
+      stmt.step();
+      stmt.free();
+      console.log('  ✓ Deleted from firebase_users_cache');
+      
+      // Delete from verification_codes
+      stmt = this.db.prepare('DELETE FROM verification_codes WHERE uid = ?');
+      stmt.bind([uid]);
+      stmt.step();
+      stmt.free();
+      console.log('  ✓ Deleted from verification_codes');
+      
+      // Delete from local user table (if exists)
+      const email = uid.startsWith('local_') ? this.getUserByLocalUid(uid)?.email : null;
+      if (email) {
+        stmt = this.db.prepare('DELETE FROM user WHERE email = ?');
+        stmt.bind([email]);
+        stmt.step();
+        stmt.free();
+        console.log('  ✓ Deleted from user table');
+      }
+      
+      // Handle user logs
+      if (deleteLogs) {
+        // Option 1: Delete all user's logs
+        stmt = this.db.prepare('DELETE FROM logs WHERE user_id = ?');
+        stmt.bind([uid]);
+        stmt.step();
+        stmt.free();
+        console.log('  ✓ Deleted user logs');
+      } else if (anonymizeLogs) {
+        // Option 2: Anonymize logs (recommended for audit trail)
+        stmt = this.db.prepare('UPDATE logs SET user_id = NULL, metadata = NULL WHERE user_id = ?');
+        stmt.bind([uid]);
+        stmt.step();
+        stmt.free();
+        console.log('  ✓ Anonymized user logs (converted to system logs)');
+      }
+      // Option 3: Keep logs as-is (do nothing)
+      
+      this.saveDatabase();
+      
+      return { 
+        success: true, 
+        message: 'User data deleted successfully',
+        deletedLogs: deleteLogs,
+        anonymizedLogs: anonymizeLogs && !deleteLogs
+      };
+    } catch (error) {
+      console.error('Error deleting user data:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  getUserByLocalUid(localUid) {
+    const id = localUid.replace('local_', '');
+    const stmt = this.db.prepare('SELECT * FROM user WHERE id = ?');
+    stmt.bind([id]);
+    if (stmt.step()) {
+      const row = stmt.getAsObject();
+      stmt.free();
+      return row;
+    }
+    stmt.free();
+    return null;
+  }
+
+  /**
    * Settings CRUD operations
    */
   getSetting(key) {
@@ -599,11 +821,11 @@ class DatabaseService {
   /**
    * Logs operations
    */
-  addLog(type, message, metadata = null, level = 'info') {
+  addLog(type, message, metadata = null, level = 'info', userId = null) {
     const stmt = this.db.prepare(
-      'INSERT INTO logs (type, level, message, metadata) VALUES (?, ?, ?, ?)'
+      'INSERT INTO logs (type, level, message, metadata, user_id) VALUES (?, ?, ?, ?, ?)'
     );
-    stmt.bind([type, level, message, metadata ? JSON.stringify(metadata) : null]);
+    stmt.bind([type, level, message, metadata ? JSON.stringify(metadata) : null, userId]);
     stmt.step();
     stmt.free();
     this.saveDatabase();
@@ -633,6 +855,35 @@ class DatabaseService {
   }
 
   /**
+   * Get logs for a specific user
+   * Returns user's logs + system logs (logs without user_id)
+   * @param {String} userId - User ID to filter logs
+   * @param {String} type - Optional log type filter
+   * @param {Number} limit - Maximum number of logs to return
+   */
+  getLogsByUser(userId, type = null, limit = 100) {
+    let query = 'SELECT * FROM logs WHERE (user_id = ? OR user_id IS NULL)';
+    const params = [userId];
+
+    if (type) {
+      query += ' AND type = ?';
+      params.push(type);
+    }
+
+    query += ' ORDER BY timestamp DESC LIMIT ?';
+    params.push(limit);
+
+    const stmt = this.db.prepare(query);
+    stmt.bind(params);
+    const results = [];
+    while (stmt.step()) {
+      results.push(stmt.getAsObject());
+    }
+    stmt.free();
+    return results;
+  }
+
+  /**
    * Enhanced logs filtering with pagination
    * @param {Object} filters - { level, type, searchText, startDate, endDate }
    * @param {Number} page - Page number (1-indexed)
@@ -641,6 +892,12 @@ class DatabaseService {
   getLogsFiltered(filters = {}, page = 1, pageSize = 50) {
     let query = 'SELECT * FROM logs WHERE 1=1';
     const params = [];
+
+    // User filter - show user's logs + system logs
+    if (filters.userId) {
+      query += ' AND (user_id = ? OR user_id IS NULL)';
+      params.push(filters.userId);
+    }
 
     // Level filter
     if (filters.level && filters.level !== 'all') {
@@ -865,7 +1122,8 @@ class DatabaseService {
    */
   close() {
     if (this.db) {
-      this.saveDatabase();
+      // Force immediate save before closing
+      this.saveDatabaseImmediate();
       this.db.close();
       console.log('Database connection closed');
     }

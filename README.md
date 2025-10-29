@@ -128,4 +128,4 @@ FortiMorph Team
 - 🔨 Module D (Battery) - backend ready, UI pending
 - ⏳ Modules E, F planned for next phase
 
-For detailed implementation status, see `Docs/IMPLEMENTATION_PLAN_more specific.md`.
+For detailed implementation status, see Docs folder.

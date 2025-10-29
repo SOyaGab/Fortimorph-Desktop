@@ -27,38 +27,125 @@ class OptimizerService {
       actions: [],
       spaceSaved: 0,
       processesEnded: 0,
-      errors: []
+      errors: [],
+      success: false // Will be set to true if at least one action succeeds
     };
 
     try {
+      console.log('Starting system optimization...');
+      
       // 1. Clear temp files
-      const tempResult = await this.clearTempFiles();
-      results.actions.push(tempResult);
-      results.spaceSaved += tempResult.spaceSaved || 0;
+      try {
+        const tempResult = await this.clearTempFiles();
+        results.actions.push(tempResult);
+        results.spaceSaved += tempResult.spaceSaved || 0;
+        console.log('Temp files cleanup:', tempResult.status);
+      } catch (err) {
+        console.error('Temp file cleanup error:', err);
+        results.actions.push({
+          action: 'Clear Temp Files',
+          status: 'error',
+          message: 'Failed to clear temp files: ' + err.message
+        });
+        results.errors.push('Temp files: ' + err.message);
+      }
 
       // 2. Clear app cache
-      const cacheResult = await this.clearAppCache();
-      results.actions.push(cacheResult);
-      results.spaceSaved += cacheResult.spaceSaved || 0;
+      try {
+        const cacheResult = await this.clearAppCache();
+        results.actions.push(cacheResult);
+        results.spaceSaved += cacheResult.spaceSaved || 0;
+        console.log('Cache cleanup:', cacheResult.status);
+      } catch (err) {
+        console.error('Cache cleanup error:', err);
+        results.actions.push({
+          action: 'Clear App Cache',
+          status: 'error',
+          message: 'Failed to clear cache: ' + err.message
+        });
+        results.errors.push('Cache: ' + err.message);
+      }
 
       // 3. Clear browser caches (optional, requires user consent)
       // Skipping for now to avoid data loss
 
       // 4. Run garbage collection if available
-      if (global.gc) {
-        global.gc();
+      try {
+        if (global.gc) {
+          global.gc();
+          results.actions.push({
+            action: 'Garbage Collection',
+            status: 'success',
+            message: 'Memory garbage collection executed'
+          });
+          console.log('Garbage collection: success');
+        } else {
+          results.actions.push({
+            action: 'Garbage Collection',
+            status: 'skipped',
+            message: 'Garbage collection not available (requires --expose-gc flag)'
+          });
+          console.log('Garbage collection: skipped (not available)');
+        }
+      } catch (err) {
+        console.error('Garbage collection error:', err);
         results.actions.push({
           action: 'Garbage Collection',
-          status: 'success',
-          message: 'Memory garbage collection executed'
+          status: 'error',
+          message: 'Failed to run garbage collection: ' + err.message
         });
       }
 
+      // Determine overall success - be more lenient with success criteria
+      const successfulActions = results.actions.filter(a => a.status === 'success' || a.status === 'warning');
+      const failedActions = results.actions.filter(a => a.status === 'error');
+      const skippedActions = results.actions.filter(a => a.status === 'skipped');
+      
+      // Consider success if:
+      // 1. At least one action succeeded, OR
+      // 2. No critical errors occurred (all are skipped/warning), OR
+      // 3. Some space was saved regardless of individual action status
+      const hasSuccessfulAction = successfulActions.length > 0;
+      const noCriticalErrors = failedActions.length === 0;
+      const achievedSomething = results.spaceSaved > 0;
+      
+      results.success = hasSuccessfulAction || noCriticalErrors || achievedSomething;
+      
+      // Add summary message
+      if (results.success) {
+        if (results.spaceSaved > 0) {
+          results.summary = `Successfully freed ${this.formatBytes(results.spaceSaved)}`;
+        } else if (noCriticalErrors) {
+          results.summary = 'System is already optimized';
+        } else {
+          results.summary = 'Optimization completed';
+        }
+      } else {
+        results.summary = 'Optimization encountered errors';
+      }
+      
+      console.log('Optimization completed:', {
+        success: results.success,
+        summary: results.summary,
+        actionsCompleted: results.actions.length,
+        successfulActions: successfulActions.length,
+        failedActions: failedActions.length,
+        spaceSaved: this.formatBytes(results.spaceSaved),
+        errors: results.errors.length
+      });
+
       this.optimizationLog.push(results);
       return results;
+      
     } catch (error) {
-      console.error('Optimization error:', error);
+      console.error('Critical optimization error:', error);
       results.errors.push(error.message);
+      results.success = false;
+      results.actions.push({
+        action: 'System Optimization',
+        status: 'error',
+        message: 'Critical error: ' + error.message
+      });
       return results;
     }
   }

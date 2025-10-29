@@ -35,6 +35,19 @@
   .spinner {
     @apply w-6 h-6 border-2 border-ocean-surface border-t-transparent rounded-full animate-spin;
   }
+
+  /* Skeleton Loading Animation */
+  .skeleton {
+    @apply bg-ocean-deep/50 rounded animate-pulse;
+  }
+
+  .skeleton-text {
+    @apply h-4 bg-ocean-deep/50 rounded animate-pulse mb-2;
+  }
+
+  .skeleton-card {
+    @apply bg-ocean-container rounded-xl shadow-ocean-lg p-6;
+  }
 }
 
 /* Custom Scrollbar */

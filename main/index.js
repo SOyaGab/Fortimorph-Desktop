@@ -7,9 +7,13 @@ const emailService = require('./services/emailService');
 const monitoringService = require('./services/monitoring');
 const optimizerService = require('./services/optimizer');
 const LogsService = require('./services/logsService');
+const BatteryService = require('./services/batteryService');
+const SystemHealthService = require('./services/systemHealthService');
 
 // Initialize services
 let logsService;
+let batteryService;
+let systemHealthService;
 
 // Initialize electron-store for secure configuration
 const store = new Store();
@@ -135,6 +139,16 @@ app.whenReady().then(async () => {
     
     // Schedule automatic log cleanup (30 days retention)
     logsService.scheduleCleanup(30);
+    
+    // Initialize battery service
+    batteryService = new BatteryService(db);
+    await batteryService.initialize();
+    console.log('Battery service initialized');
+    
+    // Initialize system health service
+    systemHealthService = new SystemHealthService(db);
+    await systemHealthService.initialize();
+    console.log('System health service initialized');
   } catch (error) {
     console.error('Failed to initialize services:', error);
   }
@@ -304,8 +318,9 @@ ipcMain.handle('auth:resend-verification', async (_event, { email }) => {
 ipcMain.handle('auth:debug-users', async () => {
   try {
     const users = db.getAllUsers();
+    const firebaseUsers = db.getAllFirebaseUsers();
     const verificationCodes = db.getAllVerificationCodes();
-    return { success: true, users, verificationCodes };
+    return { success: true, users, firebaseUsers, verificationCodes };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -316,6 +331,17 @@ ipcMain.handle('auth:manual-verify', async (_event, { uid }) => {
     const result = db.manuallyVerifyUser(uid);
     return result;
   } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('auth:delete-user', async (_event, { uid, options }) => {
+  try {
+    console.log('Delete user request:', uid, options);
+    const result = await firebase.deleteUserAccount(uid, options);
+    return result;
+  } catch (error) {
+    console.error('Delete user error:', error);
     return { success: false, error: error.message };
   }
 });
@@ -378,13 +404,96 @@ ipcMain.handle('system:get-battery', async () => {
 // System Optimization IPC Handlers
 // ========================================
 
+/**
+ * System Cooldown - Reduces CPU load and system temperature
+ * This actively cools down the device by:
+ * - Analyzing and suggesting resource-intensive processes
+ * - Optimizing memory usage
+ * - Setting power plan to power saver
+ * - Providing cooling recommendations
+ */
+ipcMain.handle('system:cooldown', async () => {
+  try {
+    console.log('Starting system cooldown...');
+    const result = await systemHealthService.coolDownSystem();
+    
+    console.log('Cooldown result:', result);
+    
+    if (result && result.success) {
+      return { 
+        success: true,
+        data: result,
+        message: 'System cooldown completed'
+      };
+    } else {
+      // Return partial results even if not fully successful
+      return {
+        success: true,
+        data: result,
+        message: 'Cooldown completed with some limitations',
+        warning: 'Some actions could not be completed'
+      };
+    }
+  } catch (error) {
+    console.error('Critical error during cooldown:', error);
+    return { 
+      success: false, 
+      error: error.message || 'Unknown error occurred during cooldown',
+      data: null 
+    };
+  }
+});
+
+/**
+ * System Optimization - Clears temp files, cache, runs GC
+ * This is DIFFERENT from Battery Optimization Mode (saver/balanced/performance)
+ * - System Optimization: Frees disk space and memory (one-time action)
+ * - Battery Optimization: Controls battery monitoring polling intervals (ongoing mode)
+ */
 ipcMain.handle('system:optimize', async () => {
   try {
+    console.log('Starting system optimization...');
     const result = await optimizerService.optimizeSystem();
-    return { success: true, data: result };
+    
+    console.log('Optimization result:', result);
+    
+    // Always return the result data for display
+    if (result && result.success) {
+      return { 
+        success: true,
+        data: result,
+        message: result.summary || 'Optimization completed successfully'
+      };
+    } else {
+      // Check if we have any successful actions despite overall failure
+      const hasSuccessfulAction = result?.actions?.some(a => a.status === 'success');
+      const hasWarnings = result?.actions?.some(a => a.status === 'warning');
+      
+      // If we have some success or warnings, treat as partial success
+      if (hasSuccessfulAction || hasWarnings) {
+        return {
+          success: true,
+          data: result,
+          message: result.summary || 'Optimization completed with some limitations',
+          warning: 'Some actions could not be completed'
+        };
+      }
+      
+      // True failure only if all actions failed
+      return {
+        success: false,
+        data: result,
+        error: result.summary || 'Optimization could not be completed',
+        details: result.errors
+      };
+    }
   } catch (error) {
-    console.error('Error optimizing system:', error);
-    return { success: false, error: error.message };
+    console.error('Critical error during optimization:', error);
+    return { 
+      success: false, 
+      error: error.message || 'Unknown error occurred during optimization',
+      data: null 
+    };
   }
 });
 
@@ -558,6 +667,10 @@ ipcMain.handle('system:delete-folder', async (_event, { folderPath }) => {
 // Get filtered logs with pagination
 ipcMain.handle('logs:getFiltered', async (_event, filters, page, pageSize) => {
   try {
+    // Add current user to filters if authenticated
+    if (sessionData.isAuthenticated && sessionData.user?.uid) {
+      filters = { ...filters, userId: sessionData.user.uid };
+    }
     const result = db.getLogsFiltered(filters, page, pageSize);
     return result;
   } catch (error) {
@@ -672,6 +785,294 @@ ipcMain.handle('logs:cleanup', async (_event, retentionDays) => {
     return result;
   } catch (error) {
     console.error('Error cleaning up logs:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// =======================
+// BATTERY IPC HANDLERS
+// =======================
+
+// Get current battery data
+ipcMain.handle('battery:getData', async () => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    const data = await batteryService.getBatteryData();
+    return { success: true, data };
+  } catch (error) {
+    console.error('Error getting battery data:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get battery report (comprehensive)
+ipcMain.handle('battery:getReport', async () => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    const report = await batteryService.getBatteryReport();
+    return { success: true, ...report };
+  } catch (error) {
+    console.error('Error getting battery report:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get battery trend (24-hour history)
+ipcMain.handle('battery:getTrend', async () => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    const trend = batteryService.getBatteryTrend();
+    return { success: true, trend };
+  } catch (error) {
+    console.error('Error getting battery trend:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get battery statistics
+ipcMain.handle('battery:getStats', async () => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    const stats = batteryService.getBatteryStats();
+    return { success: true, stats };
+  } catch (error) {
+    console.error('Error getting battery stats:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get battery alerts
+ipcMain.handle('battery:getAlerts', async (_event, limit = 20) => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    const alerts = batteryService.getAlerts(limit);
+    return { success: true, alerts };
+  } catch (error) {
+    console.error('Error getting battery alerts:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Clear all battery alerts
+ipcMain.handle('battery:clearAlerts', async () => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    batteryService.clearAlerts();
+    return { success: true };
+  } catch (error) {
+    console.error('Error clearing battery alerts:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Dismiss specific battery alert
+ipcMain.handle('battery:dismissAlert', async (_event, alertId) => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    batteryService.dismissAlert(alertId);
+    return { success: true };
+  } catch (error) {
+    console.error('Error dismissing battery alert:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Set optimization mode
+ipcMain.handle('battery:setOptimizationMode', async (_event, mode) => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    await batteryService.setOptimizationMode(mode);
+    return { success: true, mode };
+  } catch (error) {
+    console.error('Error setting optimization mode:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get optimization mode
+ipcMain.handle('battery:getOptimizationMode', async () => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    const mode = batteryService.getOptimizationMode();
+    return { success: true, mode };
+  } catch (error) {
+    console.error('Error getting optimization mode:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get optimization mode details
+ipcMain.handle('battery:getOptimizationModeDetails', async () => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    const details = batteryService.getOptimizationModeDetails();
+    return { success: true, ...details };
+  } catch (error) {
+    console.error('Error getting optimization mode details:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Update alert thresholds
+ipcMain.handle('battery:updateThresholds', async (_event, thresholds) => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    batteryService.updateThresholds(thresholds);
+    return { success: true };
+  } catch (error) {
+    console.error('Error updating thresholds:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get alert thresholds
+ipcMain.handle('battery:getThresholds', async () => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    const thresholds = batteryService.getThresholds();
+    return { success: true, thresholds };
+  } catch (error) {
+    console.error('Error getting thresholds:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Start battery monitoring
+ipcMain.handle('battery:startMonitoring', async () => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    batteryService.startMonitoring();
+    return { success: true };
+  } catch (error) {
+    console.error('Error starting battery monitoring:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Stop battery monitoring
+ipcMain.handle('battery:stopMonitoring', async () => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    batteryService.stopMonitoring();
+    return { success: true };
+  } catch (error) {
+    console.error('Error stopping battery monitoring:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ========================================
+// System Health IPC Handlers
+// ========================================
+
+// Get comprehensive system health report
+ipcMain.handle('systemHealth:getReport', async () => {
+  try {
+    if (!systemHealthService) {
+      return { success: false, error: 'System health service not initialized' };
+    }
+    const report = await systemHealthService.getHealthReport();
+    return { success: true, ...report };
+  } catch (error) {
+    console.error('Error getting system health report:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get current system health
+ipcMain.handle('systemHealth:getCurrent', async () => {
+  try {
+    if (!systemHealthService) {
+      return { success: false, error: 'System health service not initialized' };
+    }
+    const health = await systemHealthService.getSystemHealth();
+    return { success: true, health };
+  } catch (error) {
+    console.error('Error getting current system health:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get health trend
+ipcMain.handle('systemHealth:getTrend', async () => {
+  try {
+    if (!systemHealthService) {
+      return { success: false, error: 'System health service not initialized' };
+    }
+    const trend = systemHealthService.getHealthTrend();
+    return { success: true, trend };
+  } catch (error) {
+    console.error('Error getting health trend:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get cooling recommendations
+ipcMain.handle('systemHealth:getCoolingRecommendations', async () => {
+  try {
+    if (!systemHealthService) {
+      return { success: false, error: 'System health service not initialized' };
+    }
+    const recommendations = systemHealthService.getCoolingRecommendations();
+    return { success: true, recommendations };
+  } catch (error) {
+    console.error('Error getting cooling recommendations:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get system health alerts
+ipcMain.handle('systemHealth:getAlerts', async (_event, limit = 20) => {
+  try {
+    if (!systemHealthService) {
+      return { success: false, error: 'System health service not initialized' };
+    }
+    const alerts = systemHealthService.getAlerts(limit);
+    return { success: true, alerts };
+  } catch (error) {
+    console.error('Error getting system health alerts:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Clear system health alerts
+ipcMain.handle('systemHealth:clearAlerts', async () => {
+  try {
+    if (!systemHealthService) {
+      return { success: false, error: 'System health service not initialized' };
+    }
+    systemHealthService.clearAlerts();
+    return { success: true };
+  } catch (error) {
+    console.error('Error clearing system health alerts:', error);
     return { success: false, error: error.message };
   }
 });

@@ -1,15 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import LogsViewer from './LogsViewer';
+import BatteryCenter from './BatteryCenter';
 
 const Dashboard = () => {
   const [metrics, setMetrics] = useState(null);
   const [processes, setProcesses] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false); // Changed to false for instant UI
   const [error, setError] = useState(null);
-  const [selectedView, setSelectedView] = useState('overview'); // overview, cpu, memory, processes, storage, logs
-  const refreshInterval = 5000; // 5 seconds (reduced load)
+  const [selectedView, setSelectedView] = useState('overview'); // overview, cpu, memory, processes, storage, logs, battery
+  const refreshInterval = 10000; // 10 seconds (optimized from 5s)
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
   const [installedApps, setInstalledApps] = useState([]);
@@ -156,11 +157,8 @@ const Dashboard = () => {
   // Initial load - fetch metrics in background, show UI immediately
   useEffect(() => {
     const initialize = async () => {
-      // Set loading to false immediately to show UI
-      setLoading(false);
-      
       try {
-        // Fetch metrics in background
+        // Fetch metrics in background - UI is already visible
         await fetchMetrics();
       } catch (err) {
         console.error('Initialization error:', err);
@@ -183,10 +181,10 @@ const Dashboard = () => {
     return () => clearInterval(interval);
   }, [refreshInterval, loading, isFetching]);
   
-  // Auto-fetch processes when switching to processes view - ONE TIME ONLY
+  // Auto-fetch processes when switching to processes view - INITIAL LOAD ONLY
   useEffect(() => {
     if (selectedView === 'processes' && processes.length === 0 && !loading && !isRefreshingProcesses) {
-      console.log('📋 Processes view selected - loading processes (one time)');
+      console.log('📋 Processes view selected - loading processes (initial load only)');
       fetchProcesses();
     }
   }, [selectedView, loading, processes.length, isRefreshingProcesses]);
@@ -478,6 +476,16 @@ const Dashboard = () => {
         >
           System Logs
         </button>
+        <button
+          onClick={() => setSelectedView('battery')}
+          className={`px-6 py-2 rounded-lg font-semibold transition-all duration-300 transform hover:scale-105 ${
+            selectedView === 'battery'
+              ? 'bg-[#FFC300] text-[#001D3D] shadow-lg'
+              : 'bg-[#003566] text-white hover:bg-[#004A7F]'
+          }`}
+        >
+          Battery
+        </button>
       </div>
 
       {/* Overview View */}
@@ -634,11 +642,6 @@ const Dashboard = () => {
                 animation: 'slideInDown 0.5s ease-out, pulse-glow 2s ease-in-out'
               }}
             >
-              {/* Attention Arrow - Points user to results */}
-              <div className="absolute -top-8 left-1/2 transform -translate-x-1/2 animate-bounce">
-                <div className="text-[#FFD60A] text-4xl">⬇️</div>
-                <div className="text-[#FFD60A] text-sm font-bold text-center mt-1">Results Below!</div>
-              </div>
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-[#4CAF50] text-2xl font-bold flex items-center">
                   ✅ Optimization Complete!
@@ -935,10 +938,18 @@ const Dashboard = () => {
                     return displayProcesses.map((proc) => (
                       <tr key={proc.pid} className="border-b border-[#0077B6] hover:bg-[#001D3D] transition-colors duration-200">
                         <td className="py-2 px-4">{proc.pid}</td>
-                        <td className="py-2 px-4 max-w-xs truncate">{proc.name}</td>
-                        <td className="py-2 px-4 text-right">{proc.cpu}</td>
-                        <td className="py-2 px-4 text-right">{formatBytes(proc.memory)}</td>
-                        <td className="py-2 px-4 text-right">{proc.memoryPercent}</td>
+                        <td className="py-2 px-4 max-w-xs truncate" title={proc.command}>{proc.name}</td>
+                        <td className={`py-2 px-4 text-right font-mono ${
+                          parseFloat(proc.cpu || 0) > 50 ? 'text-red-400' :
+                          parseFloat(proc.cpu || 0) > 20 ? 'text-orange-400' :
+                          parseFloat(proc.cpu || 0) > 5 ? 'text-yellow-400' : 'text-white'
+                        }`}>
+                          {proc.cpu !== undefined && proc.cpu !== null ? `${proc.cpu}%` : '0.00%'}
+                        </td>
+                        <td className="py-2 px-4 text-right">{formatBytes(proc.memory || 0)}</td>
+                        <td className="py-2 px-4 text-right">
+                          {proc.memoryPercent !== undefined && proc.memoryPercent !== null ? `${proc.memoryPercent}%` : '0.00%'}
+                        </td>
                         <td className="py-2 px-4 text-center">
                           <button
                             onClick={() => handleEndProcess(proc.pid, proc.name)}
@@ -1285,6 +1296,13 @@ const Dashboard = () => {
       {selectedView === 'logs' && (
         <div className="animate-fadeIn">
           <LogsViewer />
+        </div>
+      )}
+
+      {/* Battery View */}
+      {selectedView === 'battery' && (
+        <div className="animate-fadeIn">
+          <BatteryCenter />
         </div>
       )}
     </div>

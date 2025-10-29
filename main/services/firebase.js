@@ -154,6 +154,21 @@ class FirebaseService {
       }
 
       // FIREBASE MODE: Use Firebase authentication when configured
+      
+      // Clean up orphaned local data for this email first (in case user was deleted from Firebase)
+      const orphanedCachedUser = db.getFirebaseUserByEmail(email);
+      if (orphanedCachedUser) {
+        console.log(`🧹 Cleaning up orphaned cached user data for ${email} (UID: ${orphanedCachedUser.uid})`);
+        db.deleteUserData(orphanedCachedUser.uid, { deleteLogs: true });
+      }
+      
+      // Also clean up any orphaned verification codes for this email
+      const orphanedVerification = db.getVerificationCode(email);
+      if (orphanedVerification && orphanedVerification.uid) {
+        console.log(`🧹 Cleaning up orphaned verification code for ${email}`);
+        db.deleteUserData(orphanedVerification.uid, { deleteLogs: true });
+      }
+      
       const userCredential = await createUserWithEmailAndPassword(
         this.auth,
         email,
@@ -163,12 +178,18 @@ class FirebaseService {
       console.log(`\n🔥 Firebase user created: ${userCredential.user.email}`);
       console.log(`🆔 UID: ${userCredential.user.uid}`);
 
+      // Sync Firebase user to local database cache
+      db.syncFirebaseUserToLocal(userCredential.user);
+
       // Generate verification code
       const verificationCode = this.generateVerificationCode(6);
       const expiresAt = Math.floor(Date.now() / 1000) + 600; // 10 minutes
 
       console.log(`🔑 Storing verification code for UID: ${userCredential.user.uid}`);
       console.log(`📧 Code: ${verificationCode}`);
+      console.log(`⏰ Generated at: ${Math.floor(Date.now() / 1000)} (${new Date().toLocaleString()})`);
+      console.log(`⏰ Expires at: ${expiresAt} (${new Date(expiresAt * 1000).toLocaleString()})`);
+      console.log(`⏰ Valid for: 10 minutes (600 seconds)`);
 
       // Store verification code in database using UID and email
       // For Firebase users, we store directly in verification_codes table
@@ -186,6 +207,9 @@ class FirebaseService {
         console.log(`🆔 UID: ${userCredential.user.uid}`);
         console.log('============================================================\n');
       }
+
+      // Log signup event with user ID
+      db.addLog('auth', `User signup: ${email}`, { uid: userCredential.user.uid }, 'info', userCredential.user.uid);
 
       return {
         success: true,
@@ -227,8 +251,17 @@ class FirebaseService {
       console.log(`\n🔍 Verifying email for identifier: ${identifier}, code: ${code}`);
       
       // identifier can be either email or uid
-      // Get stored verification code from database
-      const storedData = db.getVerificationCode(identifier);
+      // For signup flow, we need to check by email since we might not have the UID yet
+      let storedData = db.getVerificationCode(identifier);
+
+      // If not found and identifier looks like email, try to find by UID from cached user
+      if (!storedData && identifier.includes('@')) {
+        const cachedUser = db.getFirebaseUserByEmail(identifier);
+        if (cachedUser) {
+          console.log(`📧 Found cached user by email, trying UID: ${cachedUser.uid}`);
+          storedData = db.getVerificationCode(cachedUser.uid);
+        }
+      }
 
       console.log('📋 Stored verification data:', storedData);
 
@@ -238,7 +271,9 @@ class FirebaseService {
       }
 
       const now = Math.floor(Date.now() / 1000);
-      console.log(`⏰ Current time: ${now}, Expires at: ${storedData.expires_at}`);
+      console.log(`⏰ Current time: ${now} (${new Date(now * 1000).toLocaleString()})`);
+      console.log(`⏰ Expires at: ${storedData.expires_at} (${new Date(storedData.expires_at * 1000).toLocaleString()})`);
+      console.log(`⏰ Time remaining: ${storedData.expires_at - now} seconds`);
 
       // Check if code expired
       if (storedData.expires_at < now) {
@@ -246,16 +281,20 @@ class FirebaseService {
         return { success: false, error: 'Verification code expired. Please request a new one.' };
       }
 
-      // Check if code matches
-      console.log(`🔢 Comparing codes - Stored: "${storedData.code}" vs Entered: "${code}"`);
-      if (storedData.code !== code) {
+      // Check if code matches (handle both string and number)
+      const storedCode = String(storedData.code).trim();
+      const enteredCode = String(code).trim();
+      console.log(`🔢 Comparing codes - Stored: "${storedCode}" vs Entered: "${enteredCode}"`);
+      
+      if (storedCode !== enteredCode) {
         console.log('❌ Code mismatch!');
         return { success: false, error: 'Invalid verification code. Please try again.' };
       }
 
-      // Mark as verified in database
-      console.log('✅ Code matches! Marking as verified...');
-      db.markEmailAsVerified(identifier);
+      // Mark as verified in database (use UID if available, otherwise email)
+      const verifyIdentifier = storedData.uid || identifier;
+      console.log('✅ Code matches! Marking as verified with identifier:', verifyIdentifier);
+      db.markEmailAsVerified(verifyIdentifier);
 
       return {
         success: true,
@@ -284,18 +323,36 @@ class FirebaseService {
             password
           );
 
+          // Sync/update Firebase user to local cache
+          db.syncFirebaseUserToLocal(userCredential.user);
+          db.updateFirebaseUserLastLogin(userCredential.user.uid);
+
           // Check if email is verified in our database
-          const isVerified = db.isEmailVerified(userCredential.user.uid);
+          let isVerified = db.isEmailVerified(userCredential.user.uid);
+          
+          // Also check by email as fallback
+          if (!isVerified) {
+            console.log('⚠️ Not verified by UID, checking by email...');
+            isVerified = db.isEmailVerified(email);
+          }
+          
+          console.log(`📧 Email verification status for ${email}: ${isVerified}`);
 
           if (!isVerified) {
             // Sign out if not verified
             await signOut(this.auth);
+            db.addLog('auth', `Login failed - email not verified: ${email}`, 
+              { uid: userCredential.user.uid }, 'warning', userCredential.user.uid);
             return {
               success: false,
               error: 'Please verify your email before logging in',
               emailVerified: false,
             };
           }
+
+          // Log successful login with user ID
+          db.addLog('auth', `User login successful: ${email}`, 
+            { uid: userCredential.user.uid }, 'info', userCredential.user.uid);
 
           return {
             success: true,
@@ -345,6 +402,7 @@ class FirebaseService {
       const user = db.getUserByEmail(email);
       
       if (!user) {
+        db.addLog('auth', `Login failed - user not found: ${email}`, null, 'warning');
         return {
           success: false,
           error: 'Invalid email or password',
@@ -355,6 +413,8 @@ class FirebaseService {
       const passwordMatch = await bcrypt.compare(password, user.password_hash);
       
       if (!passwordMatch) {
+        db.addLog('auth', `Login failed - incorrect password: ${email}`, 
+          { userId: `local_${user.id}` }, 'warning', `local_${user.id}`);
         return {
           success: false,
           error: 'Invalid email or password',
@@ -363,6 +423,8 @@ class FirebaseService {
 
       // Check if email is verified
       if (!user.verified) {
+        db.addLog('auth', `Login failed - email not verified: ${email}`, 
+          { userId: `local_${user.id}` }, 'warning', `local_${user.id}`);
         return {
           success: false,
           error: 'Please verify your email before logging in',
@@ -373,10 +435,16 @@ class FirebaseService {
       // Update last login
       db.updateLastLogin(email);
 
+      const localUserId = `local_${user.id}`;
+      
+      // Log successful login with user ID
+      db.addLog('auth', `User login successful (local): ${email}`, 
+        { userId: localUserId }, 'info', localUserId);
+
       return {
         success: true,
         user: {
-          uid: `local_${user.id}`,
+          uid: localUserId,
           email: user.email,
           emailVerified: true,
           displayName: user.email.split('@')[0],
@@ -525,6 +593,64 @@ class FirebaseService {
       }
 
       return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Delete user account (both Firebase and local data)
+   * @param {String} uid - User UID
+   * @param {Object} options - Deletion options
+   * @param {Boolean} options.deleteLogs - Delete user's logs (default: true)
+   * @param {Boolean} options.anonymizeLogs - Anonymize logs instead (default: false)
+   */
+  async deleteUserAccount(uid, options = {}) {
+    try {
+      console.log(`🗑️ Initiating user deletion for UID: ${uid}`);
+      
+      // Delete from local database first
+      const localResult = db.deleteUserData(uid, options);
+      console.log('Local data deletion result:', localResult);
+      
+      // Delete from Firebase if initialized and not a local user
+      if (this.initialized && !uid.startsWith('local_')) {
+        try {
+          // Note: This requires Firebase Admin SDK for deleting users
+          // Standard Firebase Auth doesn't allow deleting other users
+          // For now, we'll just delete local data
+          console.warn('⚠️ Firebase user deletion requires Admin SDK');
+          console.warn('To delete Firebase user, go to Firebase Console > Authentication > Users');
+          
+          return {
+            success: true,
+            localDataDeleted: true,
+            firebaseUserDeleted: false,
+            message: 'Local user data deleted. Please delete Firebase user manually from Firebase Console.',
+            ...localResult
+          };
+        } catch (firebaseError) {
+          console.error('Firebase deletion error:', firebaseError);
+          return {
+            success: true,
+            localDataDeleted: true,
+            firebaseUserDeleted: false,
+            message: 'Local data deleted, but Firebase deletion failed. Delete user manually from Firebase Console.',
+            error: firebaseError.message
+          };
+        }
+      }
+      
+      // Local user - fully deleted
+      return {
+        success: true,
+        localDataDeleted: true,
+        firebaseUserDeleted: false,
+        message: 'Local user data deleted successfully',
+        ...localResult
+      };
+      
+    } catch (error) {
+      console.error('User deletion error:', error);
+      return { success: false, error: error.message };
     }
   }
 

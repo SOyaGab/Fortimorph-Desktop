@@ -87,7 +87,26 @@ contextBridge.exposeInMainWorld('electron', {
       'logs:exportMarkdown',
       'logs:exportDiagnostic',
       'logs:openExportFolder',
-      'logs:cleanup'
+      'logs:cleanup',
+      // Battery channels
+      'battery:getData',
+      'battery:getReport',
+      'battery:getTrend',
+      'battery:getStats',
+      'battery:getAlerts',
+      'battery:clearAlerts',
+      'battery:dismissAlert',
+      'battery:setOptimizationMode',
+      'battery:getOptimizationMode',
+      'battery:getOptimizationModeDetails',
+      'battery:updateThresholds',
+      'battery:getThresholds',
+      'battery:startMonitoring',
+      'battery:stopMonitoring',
+      // System health channels
+      'system:cooldown',
+      'system:optimize',
+      'systemHealth:getReport'
     ];
     
     if (validChannels.includes(channel)) {
