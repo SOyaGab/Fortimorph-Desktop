@@ -1,5 +1,6 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const Store = require('electron-store');
 const db = require('./services/database');
 const firebase = require('./services/firebase');
@@ -9,11 +10,19 @@ const optimizerService = require('./services/optimizer');
 const LogsService = require('./services/logsService');
 const BatteryService = require('./services/batteryService');
 const SystemHealthService = require('./services/systemHealthService');
+const QuarantineService = require('./services/quarantineService');
+const BackupService = require('./services/backupService');
+const ConversionService = require('./services/conversionService');
+const { verificationService } = require('./services/verificationService');
+const antivirusService = require('./services/antivirusService');
 
 // Initialize services
 let logsService;
 let batteryService;
 let systemHealthService;
+let quarantineService;
+let backupService;
+let conversionService;
 
 // Initialize electron-store for secure configuration
 const store = new Store();
@@ -107,6 +116,11 @@ function createWindow() {
   // Show window when ready
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
+    
+    // Pass mainWindow reference to battery service for notification click handling
+    if (batteryService) {
+      batteryService.setMainWindow(mainWindow);
+    }
   });
 
   mainWindow.on('closed', () => {
@@ -149,6 +163,25 @@ app.whenReady().then(async () => {
     systemHealthService = new SystemHealthService(db);
     await systemHealthService.initialize();
     console.log('System health service initialized');
+    
+    // Initialize quarantine service
+    quarantineService = new QuarantineService(db, logsService);
+    await quarantineService.initialize();
+    console.log('Quarantine service initialized');
+    
+    // Initialize backup service
+    const backupBasePath = path.join(app.getPath('userData'), 'backups');
+    backupService = new BackupService(db);
+    await backupService.initialize(backupBasePath);
+    console.log('Backup service initialized');
+    
+    // Initialize conversion service
+    conversionService = new ConversionService(db, logsService);
+    console.log('Conversion service initialized');
+    
+    // Initialize antivirus service
+    await antivirusService.initialize();
+    console.log('Antivirus service initialized');
   } catch (error) {
     console.error('Failed to initialize services:', error);
   }
@@ -163,6 +196,11 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
+  // Cleanup services
+  if (quarantineService) {
+    quarantineService.cleanup();
+  }
+  
   // Close database connection
   db.close();
   
@@ -320,7 +358,73 @@ ipcMain.handle('auth:debug-users', async () => {
     const users = db.getAllUsers();
     const firebaseUsers = db.getAllFirebaseUsers();
     const verificationCodes = db.getAllVerificationCodes();
-    return { success: true, users, firebaseUsers, verificationCodes };
+    
+    // Log database information
+    console.log('========================================');
+    console.log('DATABASE DEBUG INFO');
+    console.log('Database path:', db.dbPath);
+    console.log('Users count:', users.length);
+    console.log('Firebase users count:', firebaseUsers.length);
+    console.log('Verification codes count:', verificationCodes.length);
+    console.log('========================================');
+    
+    return { 
+      success: true, 
+      users, 
+      firebaseUsers, 
+      verificationCodes,
+      dbPath: db.dbPath 
+    };
+  } catch (error) {
+    console.error('Error getting debug users:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Database health check
+ipcMain.handle('database:health-check', async () => {
+  try {
+    const health = {
+      isInitialized: db && db.db !== null,
+      dbPath: db.dbPath,
+      dbExists: require('fs').existsSync(db.dbPath),
+      userCount: 0,
+      logCount: 0,
+      backupCount: 0
+    };
+    
+    if (health.isInitialized) {
+      // Count records in main tables
+      try {
+        const users = db.getAllUsers();
+        health.userCount = users.length;
+      } catch (e) {
+        console.error('Error counting users:', e);
+      }
+      
+      try {
+        const stmt = db.db.prepare("SELECT COUNT(*) as count FROM logs");
+        stmt.step();
+        const row = stmt.getAsObject();
+        health.logCount = row.count || 0;
+        stmt.free();
+      } catch (e) {
+        console.error('Error counting logs:', e);
+      }
+      
+      try {
+        const stmt = db.db.prepare("SELECT COUNT(*) as count FROM backups");
+        stmt.step();
+        const row = stmt.getAsObject();
+        health.backupCount = row.count || 0;
+        stmt.free();
+      } catch (e) {
+        console.error('Error counting backups:', e);
+      }
+    }
+    
+    console.log('Database Health Check:', health);
+    return { success: true, data: health };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -366,6 +470,87 @@ ipcMain.handle('system:get-processes', async () => {
     return { success: true, data: processes };
   } catch (error) {
     console.error('Error getting process list:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Real-time process streaming for Processes tab
+let processStreamInterval = null;
+let isStreamActive = false;
+
+ipcMain.handle('system:start-process-stream', async (event) => {
+  try {
+    console.log('[Process Stream] Starting real-time process updates...');
+    
+    // Prevent multiple streams
+    if (isStreamActive) {
+      console.log('[Process Stream] Stream already active, skipping...');
+      return { success: true, message: 'Stream already running' };
+    }
+    
+    // Clear any existing interval
+    if (processStreamInterval) {
+      clearInterval(processStreamInterval);
+      processStreamInterval = null;
+    }
+    
+    isStreamActive = true;
+    
+    // Send initial data immediately
+    try {
+      const initialProcesses = await monitoringService.getProcessList();
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('process-update', { success: true, data: initialProcesses });
+      }
+    } catch (error) {
+      console.error('[Process Stream] Error fetching initial data:', error);
+    }
+    
+    // Set up interval to send updates every 3 seconds (reduced from 2s)
+    processStreamInterval = setInterval(async () => {
+      try {
+        if (!event.sender.isDestroyed() && isStreamActive) {
+          const processes = await monitoringService.getProcessList();
+          event.sender.send('process-update', { success: true, data: processes });
+        } else {
+          // Clean up if window is destroyed
+          console.log('[Process Stream] Window destroyed, cleaning up...');
+          clearInterval(processStreamInterval);
+          processStreamInterval = null;
+          isStreamActive = false;
+        }
+      } catch (error) {
+        console.error('[Process Stream] Error fetching processes:', error);
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('process-update', { success: false, error: error.message });
+        }
+      }
+    }, 3000); // 3 seconds - fetching ALL processes with pidusage takes time
+    
+    console.log('[Process Stream] Stream started successfully (3s interval, ALL processes)');
+    return { success: true, message: 'Process stream started' };
+  } catch (error) {
+    console.error('[Process Stream] Error starting stream:', error);
+    isStreamActive = false;
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('system:stop-process-stream', async () => {
+  try {
+    console.log('[Process Stream] Stopping real-time process updates...');
+    
+    isStreamActive = false;
+    
+    if (processStreamInterval) {
+      clearInterval(processStreamInterval);
+      processStreamInterval = null;
+      console.log('[Process Stream] Stream stopped successfully');
+    }
+    
+    return { success: true, message: 'Process stream stopped' };
+  } catch (error) {
+    console.error('[Process Stream] Error stopping stream:', error);
     return { success: false, error: error.message };
   }
 });
@@ -503,6 +688,16 @@ ipcMain.handle('system:end-process', async (_event, { pid, force }) => {
     return { success: result.success, data: result };
   } catch (error) {
     console.error('Error ending process:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('system:end-process-by-name', async (_event, { processName }) => {
+  try {
+    const result = await optimizerService.endProcessByName(processName);
+    return { success: result.success, data: result };
+  } catch (error) {
+    console.error('Error ending process by name:', error);
     return { success: false, error: error.message };
   }
 });
@@ -989,6 +1184,34 @@ ipcMain.handle('battery:stopMonitoring', async () => {
   }
 });
 
+// Get historical app usage analytics
+ipcMain.handle('battery:getHistoricalUsage', async (_event, timeframe) => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    const data = await batteryService.getHistoricalAppUsageAnalytics(timeframe || 'today');
+    return { success: true, data };
+  } catch (error) {
+    console.error('Error getting historical app usage:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get all timeframe usage insights
+ipcMain.handle('battery:getAllTimeframeInsights', async () => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    const data = await batteryService.getAllTimeframeUsageInsights();
+    return { success: true, data };
+  } catch (error) {
+    console.error('Error getting all timeframe insights:', error);
+    return { success: false, error: error.message };
+  }
+});
+
 // ========================================
 // System Health IPC Handlers
 // ========================================
@@ -1074,6 +1297,727 @@ ipcMain.handle('systemHealth:clearAlerts', async () => {
   } catch (error) {
     console.error('Error clearing system health alerts:', error);
     return { success: false, error: error.message };
+  }
+});
+
+// ========================================
+// Quarantine IPC Handlers
+// ========================================
+
+// Quarantine a file
+ipcMain.handle('quarantine:quarantineFile', async (_event, { filePath, reason }) => {
+  try {
+    if (!quarantineService) {
+      return { success: false, error: 'Quarantine service not initialized' };
+    }
+    const result = await quarantineService.quarantineFile(filePath, reason);
+    return result;
+  } catch (error) {
+    console.error('Error quarantining file:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Restore file from quarantine
+ipcMain.handle('quarantine:restoreFile', async (_event, params) => {
+  const startTime = Date.now();
+  try {
+    if (!quarantineService) {
+      throw new Error('Quarantine service not initialized');
+    }
+    
+    console.log('Restore quarantine params:', params);
+    const { quarantineId, restorePath, conflictMode } = params;
+    
+    if (!quarantineId) {
+      throw new Error('Missing required parameter: quarantineId');
+    }
+    
+    console.log(`[Quarantine] Starting restore of file ID ${quarantineId}...`);
+    const result = await quarantineService.restoreFile(quarantineId, restorePath, conflictMode);
+    const duration = Date.now() - startTime;
+    console.log(`[Quarantine] Restore completed in ${duration}ms:`, result);
+    return result;
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    console.error(`[Quarantine] Error restoring file after ${duration}ms:`, error);
+    return { 
+      success: false, 
+      error: error.message || 'Unknown error occurred during restore' 
+    };
+  }
+});
+
+// Purge file from quarantine
+ipcMain.handle('quarantine:purgeFile', async (_event, { quarantineId }) => {
+  try {
+    if (!quarantineService) {
+      return { success: false, error: 'Quarantine service not initialized' };
+    }
+    const result = await quarantineService.purgeFile(quarantineId);
+    return result;
+  } catch (error) {
+    console.error('Error purging file:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get quarantined files
+ipcMain.handle('quarantine:getQuarantinedFiles', async (_event, filters) => {
+  try {
+    if (!quarantineService) {
+      return { success: false, error: 'Quarantine service not initialized' };
+    }
+    const files = quarantineService.getQuarantinedFiles(filters || {});
+    return files;
+  } catch (error) {
+    console.error('Error getting quarantined files:', error);
+    return [];
+  }
+});
+
+// Get quarantine statistics
+ipcMain.handle('quarantine:getStats', async () => {
+  try {
+    if (!quarantineService) {
+      return { success: false, error: 'Quarantine service not initialized' };
+    }
+    const stats = quarantineService.getQuarantineStats();
+    return stats;
+  } catch (error) {
+    console.error('Error getting quarantine stats:', error);
+    return {
+      totalFiles: 0,
+      totalSize: 0,
+      restoredFiles: 0,
+      purgedFiles: 0,
+      queuedFiles: 0
+    };
+  }
+});
+
+// Get retry queue
+ipcMain.handle('quarantine:getRetryQueue', async () => {
+  try {
+    if (!quarantineService) {
+      return { success: false, error: 'Quarantine service not initialized' };
+    }
+    const queue = quarantineService.getRetryQueue();
+    return queue;
+  } catch (error) {
+    console.error('Error getting retry queue:', error);
+    return [];
+  }
+});
+
+// Open quarantine folder
+ipcMain.handle('quarantine:openFolder', async () => {
+  try {
+    if (!quarantineService) {
+      return { success: false, error: 'Quarantine service not initialized' };
+    }
+    const quarantineDir = quarantineService.getQuarantineDir();
+    await shell.openPath(quarantineDir);
+    return { success: true };
+  } catch (error) {
+    console.error('Error opening quarantine folder:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ========================================
+// Backup IPC Handlers
+// ========================================
+
+// Create backup
+ipcMain.handle('backup:create', async (_event, { name, sourcePath, options }) => {
+  try {
+    if (!backupService) {
+      return { success: false, error: 'Backup service not initialized' };
+    }
+    
+    const result = await backupService.createBackup(sourcePath, { name, ...options });
+    return result;
+  } catch (error) {
+    console.error('Error creating backup:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Restore backup
+ipcMain.handle('backup:restore', async (_event, params) => {
+  try {
+    if (!backupService) {
+      throw new Error('Backup service not initialized');
+    }
+    
+    console.log('Restore backup params:', params);
+    const { backupId, targetPath, options } = params;
+    
+    if (!backupId || !targetPath) {
+      throw new Error('Missing required parameters: backupId and targetPath');
+    }
+    
+    const result = await backupService.restoreBackup(backupId, targetPath, options || {});
+    console.log('Restore backup result:', result);
+    return result;
+  } catch (error) {
+    console.error('Error restoring backup:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Verify backup
+ipcMain.handle('backup:verify', async (_event, backupId) => {
+  try {
+    if (!backupService) {
+      return { success: false, error: 'Backup service not initialized' };
+    }
+    
+    const result = await backupService.verifyBackup(backupId);
+    return result;
+  } catch (error) {
+    console.error('Error verifying backup:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// List backups
+ipcMain.handle('backup:list', async () => {
+  try {
+    if (!backupService) {
+      return [];
+    }
+    
+    const backups = backupService.listBackups();
+    return backups;
+  } catch (error) {
+    console.error('Error listing backups:', error);
+    return [];
+  }
+});
+
+// Delete backup
+ipcMain.handle('backup:delete', async (_event, backupId) => {
+  try {
+    if (!backupService) {
+      return { success: false, error: 'Backup service not initialized' };
+    }
+    
+    const result = await backupService.deleteBackup(backupId);
+    return result;
+  } catch (error) {
+    console.error('Error deleting backup:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Generate recovery key
+ipcMain.handle('backup:generateRecoveryKey', async () => {
+  try {
+    if (!backupService) {
+      return { success: false, error: 'Backup service not initialized' };
+    }
+    
+    const recoveryKey = backupService.generateRecoveryKey();
+    return { success: true, recoveryKey };
+  } catch (error) {
+    console.error('Error generating recovery key:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ========================================
+// Verification Token IPC Handlers
+// ========================================
+
+// Generate verification token
+ipcMain.handle('verification:generate', async (_event, options) => {
+  try {
+    console.log('[IPC] verification:generate called with options:', JSON.stringify(options, null, 2));
+    const result = await verificationService.generateToken(options);
+    console.log('[IPC] Token generated successfully:', result.tokenId);
+    return { success: true, data: result };
+  } catch (error) {
+    console.error('[IPC] Error generating verification token:', error);
+    console.error('[IPC] Error stack:', error.stack);
+    console.error('[IPC] Options that failed:', JSON.stringify(options, null, 2));
+    return { success: false, error: error.message };
+  }
+});
+
+// Verify token
+ipcMain.handle('verification:verify', async (_event, tokenString) => {
+  try {
+    const result = await verificationService.verifyToken(tokenString);
+    return result;
+  } catch (error) {
+    console.error('Error verifying token:', error);
+    return { valid: false, error: 'VERIFICATION_ERROR', message: error.message };
+  }
+});
+
+// Get token info
+ipcMain.handle('verification:getTokenInfo', async (_event, tokenId) => {
+  try {
+    const info = await verificationService.getTokenInfo(tokenId);
+    return { success: true, data: info };
+  } catch (error) {
+    console.error('Error getting token info:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// List tokens
+ipcMain.handle('verification:listTokens', async (_event, filters) => {
+  try {
+    const tokens = await verificationService.listTokens(filters || {});
+    return tokens;
+  } catch (error) {
+    console.error('Error listing tokens:', error);
+    return [];
+  }
+});
+
+// Delete token
+ipcMain.handle('verification:deleteToken', async (_event, tokenId) => {
+  try {
+    const result = await verificationService.deleteToken(tokenId);
+    return { success: result };
+  } catch (error) {
+    console.error('Error deleting token:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Cleanup expired tokens
+ipcMain.handle('verification:cleanup', async () => {
+  try {
+    const deleted = await verificationService.cleanupExpiredTokens();
+    return deleted;
+  } catch (error) {
+    console.error('Error cleaning up tokens:', error);
+    return 0;
+  }
+});
+
+// Get backups for resource selection
+ipcMain.handle('verification:getBackups', async () => {
+  try {
+    const backups = db.getBackupsForSelection();
+    return backups;
+  } catch (error) {
+    console.error('Error getting backups:', error);
+    return [];
+  }
+});
+
+// Get conversion history for resource selection
+ipcMain.handle('verification:getConversionHistory', async () => {
+  try {
+    const conversions = db.getConversionHistoryForSelection();
+    return conversions;
+  } catch (error) {
+    console.error('Error getting conversion history:', error);
+    return [];
+  }
+});
+
+// Get diagnostic reports for resource selection
+ipcMain.handle('verification:getDiagnosticReports', async () => {
+  try {
+    const reports = db.getDiagnosticReportsForSelection();
+    return reports;
+  } catch (error) {
+    console.error('Error getting diagnostic reports:', error);
+    return [];
+  }
+});
+
+// Open file dialog for file browsing
+ipcMain.handle('verification:openFileDialog', async () => {
+  try {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      title: 'Select File to Verify'
+    });
+    return result;
+  } catch (error) {
+    console.error('Error opening file dialog:', error);
+    return { canceled: true };
+  }
+});
+
+// Open folder dialog for folder browsing
+ipcMain.handle('verification:openFolderDialog', async () => {
+  try {
+    const result = await dialog.showOpenDialog({
+      properties: ['openDirectory'],
+      title: 'Select Folder to Verify'
+    });
+    return result;
+  } catch (error) {
+    console.error('Error opening folder dialog:', error);
+    return { canceled: true };
+  }
+});
+
+// Calculate file hash
+ipcMain.handle('verification:calculateFileHash', async (_event, filePath) => {
+  try {
+    const fs = require('fs');
+    const crypto = require('crypto');
+    const path = require('path');
+    
+    // Get file stats
+    const stats = fs.statSync(filePath);
+    
+    // Calculate SHA-256 hash
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    
+    return new Promise((resolve, reject) => {
+      stream.on('data', (data) => hash.update(data));
+      stream.on('end', () => {
+        resolve({
+          name: path.basename(filePath),
+          path: filePath,
+          size: stats.size,
+          hash: hash.digest('hex')
+        });
+      });
+      stream.on('error', (error) => reject(error));
+    });
+  } catch (error) {
+    console.error('Error calculating file hash:', error);
+    throw error;
+  }
+});
+
+// Calculate folder hash (hash of all files)
+ipcMain.handle('verification:calculateFolderHash', async (_event, folderPath) => {
+  try {
+    const fs = require('fs');
+    const crypto = require('crypto');
+    const path = require('path');
+    
+    // Get all files in folder recursively
+    const getAllFiles = (dirPath, arrayOfFiles = []) => {
+      const files = fs.readdirSync(dirPath);
+      
+      files.forEach((file) => {
+        const filePath = path.join(dirPath, file);
+        if (fs.statSync(filePath).isDirectory()) {
+          arrayOfFiles = getAllFiles(filePath, arrayOfFiles);
+        } else {
+          arrayOfFiles.push(filePath);
+        }
+      });
+      
+      return arrayOfFiles;
+    };
+    
+    const files = getAllFiles(folderPath);
+    const hash = crypto.createHash('sha256');
+    
+    // Hash all file paths and contents
+    for (const file of files) {
+      hash.update(file);
+      const content = fs.readFileSync(file);
+      hash.update(content);
+    }
+    
+    return {
+      name: path.basename(folderPath),
+      path: folderPath,
+      size: files.reduce((total, file) => total + fs.statSync(file).size, 0),
+      hash: hash.digest('hex'),
+      fileCount: files.length
+    };
+  } catch (error) {
+    console.error('Error calculating folder hash:', error);
+    throw error;
+  }
+});
+
+// Parse QR code from image file
+ipcMain.handle('verification:parseQRCode', async (_event, imagePath) => {
+  try {
+    const jsQR = require('jsqr');
+    const { createCanvas, loadImage } = require('canvas');
+    const fs = require('fs');
+    
+    // Load image
+    const image = await loadImage(imagePath);
+    const canvas = createCanvas(image.width, image.height);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(image, 0, 0);
+    
+    // Get image data
+    const imageData = ctx.getImageData(0, 0, image.width, image.height);
+    
+    // Parse QR code
+    const code = jsQR(imageData.data, imageData.width, imageData.height);
+    
+    if (code) {
+      return { success: true, data: code.data };
+    } else {
+      return { success: false, error: 'No QR code found in image' };
+    }
+  } catch (error) {
+    console.error('Error parsing QR code:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Open backup folder
+ipcMain.handle('backup:openFolder', async () => {
+  try {
+    if (!backupService) {
+      return { success: false, error: 'Backup service not initialized' };
+    }
+    const backupDir = backupService.getBackupDir();
+    await shell.openPath(backupDir);
+    return { success: true };
+  } catch (error) {
+    console.error('Error opening backup folder:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ========================================
+// Conversion Handlers
+// ========================================
+
+// Execute file conversion
+ipcMain.handle('conversion:execute', async (_event, options) => {
+  try {
+    if (!conversionService) {
+      return { success: false, error: 'Conversion service not initialized' };
+    }
+
+    const result = await conversionService.convert(options);
+    return result;
+  } catch (error) {
+    console.error('Error executing conversion:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Package multiple files
+ipcMain.handle('conversion:package', async (_event, options) => {
+  try {
+    if (!conversionService) {
+      return { success: false, error: 'Conversion service not initialized' };
+    }
+
+    const result = await conversionService.packageFiles(
+      options.filePaths,
+      options.outputPath,
+      options
+    );
+    return result;
+  } catch (error) {
+    console.error('Error packaging files:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get supported output formats
+ipcMain.handle('conversion:getSupportedFormats', async (_event, inputPath) => {
+  try {
+    console.log('🔄 Getting supported formats for:', inputPath);
+    
+    if (!conversionService) {
+      console.warn('⚠️ Conversion service not initialized');
+      return [];
+    }
+
+    const formats = conversionService.getSupportedOutputFormats(inputPath);
+    console.log('✅ Supported formats:', formats);
+    
+    return formats || [];
+  } catch (error) {
+    console.error('❌ Error getting supported formats:', error);
+    return [];
+  }
+});
+
+// List conversion history
+ipcMain.handle('conversion:list', async (_event, limit) => {
+  try {
+    if (!conversionService) {
+      return [];
+    }
+
+    const history = await conversionService.getConversionHistory(limit || 50);
+    return history;
+  } catch (error) {
+    console.error('Error listing conversions:', error);
+    return [];
+  }
+});
+
+// Verify conversion integrity
+ipcMain.handle('conversion:verify', async (_event, conversionId) => {
+  try {
+    if (!conversionService) {
+      return { success: false, error: 'Conversion service not initialized' };
+    }
+
+    // Add timeout wrapper to prevent UI freeze
+    const verifyWithTimeout = async () => {
+      return new Promise(async (resolve, reject) => {
+        // Set timeout to 15 seconds
+        const timeoutId = setTimeout(() => {
+          reject(new Error('Verification timeout - operation took too long'));
+        }, 15000);
+
+        try {
+          const result = await conversionService.verifyConversion(conversionId);
+          clearTimeout(timeoutId);
+          resolve(result);
+        } catch (error) {
+          clearTimeout(timeoutId);
+          reject(error);
+        }
+      });
+    };
+
+    const result = await verifyWithTimeout();
+    return result;
+  } catch (error) {
+    console.error('Error verifying conversion:', error);
+    
+    // Return a safe result even on timeout
+    return { 
+      success: false, 
+      isValid: false,
+      error: error.message,
+      virusScan: {
+        isClean: true,
+        threat: null,
+        message: 'Verification timeout or error occurred',
+        skipped: true
+      }
+    };
+  }
+});
+
+// Get conversion statistics
+ipcMain.handle('conversion:getStats', async () => {
+  try {
+    if (!conversionService) {
+      return { total: 0, completed: 0, failed: 0 };
+    }
+
+    const stats = await db.getConversionStats();
+    return stats;
+  } catch (error) {
+    console.error('Error getting conversion stats:', error);
+    return { total: 0, completed: 0, failed: 0 };
+  }
+});
+
+// Select output directory
+ipcMain.handle('conversion:selectOutputDirectory', async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory'],
+      title: 'Select Output Directory'
+    });
+    
+    if (result.canceled || result.filePaths.length === 0) {
+      return null;
+    }
+    
+    return result.filePaths[0];
+  } catch (error) {
+    console.error('Error selecting output directory:', error);
+    return null;
+  }
+});
+
+// Open conversion folder
+ipcMain.handle('conversion:openFolder', async (_event, { filePath } = {}) => {
+  try {
+    if (!conversionService) {
+      return { success: false, error: 'Conversion service not initialized' };
+    }
+    
+    let folderToOpen;
+    
+    // If a specific file path is provided, open its directory
+    if (filePath) {
+      folderToOpen = path.dirname(filePath);
+    } else {
+      // Otherwise, get the most recent conversion directory
+      folderToOpen = await conversionService.getConversionDir();
+    }
+    
+    console.log('Opening folder:', folderToOpen);
+    await shell.openPath(folderToOpen);
+    return { success: true, path: folderToOpen };
+  } catch (error) {
+    console.error('Error opening conversion folder:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Open converted file directly
+ipcMain.handle('conversion:openFile', async (_event, { filePath }) => {
+  try {
+    if (!filePath) {
+      return { success: false, error: 'File path is required' };
+    }
+    
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      return { success: false, error: 'File not found' };
+    }
+    
+    console.log('Opening file:', filePath);
+    const result = await shell.openPath(filePath);
+    
+    // openPath returns empty string on success, or error message on failure
+    if (result) {
+      console.error('Failed to open file:', result);
+      return { success: false, error: result };
+    }
+    
+    return { success: true, path: filePath };
+  } catch (error) {
+    console.error('Error opening file:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ========================================
+// File Dialog Handlers
+// ========================================
+
+// Show open file dialog
+ipcMain.handle('show-open-dialog', async (_event, options) => {
+  try {
+    const { dialog } = require('electron');
+    const result = await dialog.showOpenDialog(mainWindow, options);
+    return result;
+  } catch (error) {
+    console.error('Error showing open dialog:', error);
+    return { canceled: true, error: error.message };
+  }
+});
+
+// Show open directory dialog
+ipcMain.handle('dialog:openDirectory', async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory']
+    });
+    return result;
+  } catch (error) {
+    console.error('Error showing directory dialog:', error);
+    return { canceled: true, error: error.message };
   }
 });
 

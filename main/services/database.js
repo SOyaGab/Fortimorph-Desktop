@@ -247,6 +247,208 @@ class DatabaseService {
     } catch (error) {
       console.log('Email column migration check completed');
     }
+
+    // Battery App Usage History Table - stores per-app battery usage metrics
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS app_usage_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        app_name TEXT NOT NULL,
+        app_command TEXT,
+        pid INTEGER,
+        session_id TEXT,
+        cpu_percent REAL DEFAULT 0,
+        memory_percent REAL DEFAULT 0,
+        battery_impact REAL DEFAULT 0,
+        timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+        date_key TEXT NOT NULL
+      )
+    `);
+    
+    // Battery App Usage Sessions - tracks when apps start/stop
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS app_usage_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT UNIQUE NOT NULL,
+        app_name TEXT NOT NULL,
+        app_command TEXT,
+        pid INTEGER,
+        start_time INTEGER NOT NULL,
+        end_time INTEGER,
+        total_cpu REAL DEFAULT 0,
+        total_memory REAL DEFAULT 0,
+        total_battery_impact REAL DEFAULT 0,
+        samples_count INTEGER DEFAULT 0,
+        is_active INTEGER DEFAULT 1
+      )
+    `);
+
+    // Create indexes for better query performance
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_history_timestamp ON app_usage_history(timestamp)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_history_date_key ON app_usage_history(date_key)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_history_app_name ON app_usage_history(app_name)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_sessions_session_id ON app_usage_sessions(session_id)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_sessions_app_name ON app_usage_sessions(app_name)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_sessions_start_time ON app_usage_sessions(start_time)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_sessions_is_active ON app_usage_sessions(is_active)`);
+
+    // Create conversions table for file conversion tracking
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS conversions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        input_path TEXT NOT NULL,
+        output_path TEXT NOT NULL,
+        input_format TEXT NOT NULL,
+        output_format TEXT NOT NULL,
+        input_size INTEGER,
+        output_size INTEGER,
+        hash_before TEXT,
+        hash_after TEXT,
+        encrypted INTEGER DEFAULT 0,
+        compressed INTEGER DEFAULT 0,
+        duration INTEGER,
+        status TEXT NOT NULL,
+        error TEXT,
+        timestamp TEXT NOT NULL
+      )
+    `);
+    
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_conversions_timestamp ON conversions(timestamp DESC)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_conversions_status ON conversions(status)`);
+    
+    // Create app_settings table for persistent configuration
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        created_at INTEGER DEFAULT (strftime('%s', 'now')),
+        updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+      )
+    `);
+
+    // Create verification_tokens table for QR-based verification
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS verification_tokens (
+        token_id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        resource_id TEXT NOT NULL,
+        resource_name TEXT,
+        system_id TEXT NOT NULL,
+        issued_at INTEGER NOT NULL,
+        expires_at INTEGER,
+        ttl INTEGER,
+        one_time_use INTEGER DEFAULT 0,
+        used INTEGER DEFAULT 0,
+        used_at INTEGER,
+        metadata TEXT,
+        signature TEXT NOT NULL,
+        file_path TEXT,
+        file_hash TEXT
+      )
+    `);
+    
+    // Migrate existing verification_tokens table
+    try {
+      const checkStmt = this.db.prepare("PRAGMA table_info(verification_tokens)");
+      let hasFilePath = false;
+      let hasFileHash = false;
+      let hasTTL = false;
+      let expiresAtNotNull = false;
+      
+      while (checkStmt.step()) {
+        const row = checkStmt.getAsObject();
+        if (row.name === 'file_path') hasFilePath = true;
+        if (row.name === 'file_hash') hasFileHash = true;
+        if (row.name === 'ttl') hasTTL = true;
+        if (row.name === 'expires_at' && row.notnull === 1) {
+          expiresAtNotNull = true;
+        }
+      }
+      checkStmt.free();
+      
+      // FIX: If expires_at has NOT NULL constraint, we need to migrate the table
+      if (expiresAtNotNull) {
+        console.log('MIGRATING: Removing NOT NULL constraint from expires_at column...');
+        
+        // Check if there are any existing tokens
+        let tokenCount = 0;
+        try {
+          const countStmt = this.db.prepare('SELECT COUNT(*) as count FROM verification_tokens');
+          if (countStmt.step()) {
+            tokenCount = countStmt.getAsObject().count;
+          }
+          countStmt.free();
+          console.log(`Found ${tokenCount} existing tokens in database`);
+        } catch (e) {
+          console.log('Could not count tokens:', e.message);
+        }
+        
+        // If there are existing tokens that may not have signature, delete them
+        // (They're likely expired or invalid anyway since they're from old schema)
+        if (tokenCount > 0) {
+          console.log('Deleting old tokens before migration (old schema incompatible)...');
+          this.db.exec('DELETE FROM verification_tokens');
+        }
+        
+        // Drop any leftover migration table from previous failed attempts
+        try {
+          this.db.exec('DROP TABLE IF EXISTS verification_tokens_new');
+        } catch (e) {
+          console.log('No leftover migration table to clean up');
+        }
+        
+        // Now we can safely recreate the table
+        // 1. Create new table with correct schema
+        this.db.exec(`
+          CREATE TABLE verification_tokens_new (
+            token_id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            resource_id TEXT NOT NULL,
+            resource_name TEXT,
+            system_id TEXT NOT NULL,
+            issued_at INTEGER NOT NULL,
+            expires_at INTEGER,
+            ttl INTEGER,
+            one_time_use INTEGER DEFAULT 0,
+            used INTEGER DEFAULT 0,
+            used_at INTEGER,
+            metadata TEXT,
+            signature TEXT NOT NULL,
+            file_path TEXT,
+            file_hash TEXT
+          )
+        `);
+        
+        // 2. Drop old table
+        this.db.exec('DROP TABLE verification_tokens');
+        
+        // 3. Rename new table to original name
+        this.db.exec('ALTER TABLE verification_tokens_new RENAME TO verification_tokens');
+        
+        console.log('✓ Migration complete: expires_at now allows NULL values');
+        
+        // Save immediately after migration
+        this.saveDatabaseImmediate();
+      }
+      
+      if (!hasFilePath) {
+        console.log('Adding file_path column to verification_tokens table...');
+        this.db.exec('ALTER TABLE verification_tokens ADD COLUMN file_path TEXT');
+      }
+      if (!hasFileHash) {
+        console.log('Adding file_hash column to verification_tokens table...');
+        this.db.exec('ALTER TABLE verification_tokens ADD COLUMN file_hash TEXT');
+      }
+      if (!hasTTL) {
+        console.log('Adding ttl column to verification_tokens table...');
+        this.db.exec('ALTER TABLE verification_tokens ADD COLUMN ttl INTEGER');
+      }
+    } catch (error) {
+      console.warn('Migration check for verification_tokens table:', error.message);
+    }
+    
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_verification_tokens_resource ON verification_tokens(resource_id)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_verification_tokens_type ON verification_tokens(type)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_verification_tokens_expires ON verification_tokens(expires_at)`);
     
     this.saveDatabase();
   }
@@ -832,6 +1034,226 @@ class DatabaseService {
     return { success: true };
   }
 
+  /**
+   * Verification Token operations
+   */
+  addVerificationToken(tokenId, type, resourceId, resourceName, systemId, issuedAt, expiresAt, ttl, oneTimeUse, metadata, signature, filePath = null, fileHash = null) {
+    let stmt = null;
+    try {
+      console.log('[Database] Adding verification token with RAW inputs:', {
+        tokenId: typeof tokenId + ' = ' + tokenId,
+        type: typeof type + ' = ' + type,
+        resourceId: typeof resourceId + ' = ' + resourceId,
+        expiresAt: typeof expiresAt + ' = ' + expiresAt,
+        ttl: typeof ttl + ' = ' + ttl,
+        isPermanent: ttl === null,
+        expiresAtIsNull: expiresAt === null,
+        oneTimeUse: typeof oneTimeUse + ' = ' + oneTimeUse
+      });
+
+      // Ensure database is initialized
+      if (!this.db) {
+        throw new Error('Database not initialized');
+      }
+
+      // Check table schema first to ensure it matches expectations
+      try {
+        const schemaStmt = this.db.prepare("PRAGMA table_info(verification_tokens)");
+        const columns = [];
+        while (schemaStmt.step()) {
+          const col = schemaStmt.getAsObject();
+          columns.push(`${col.name} (${col.type}${col.notnull ? ' NOT NULL' : ''})`);
+        }
+        schemaStmt.free();
+        console.log('[Database] Table schema:', columns.join(', '));
+      } catch (schemaError) {
+        console.error('[Database] Could not read schema:', schemaError.message);
+      }
+
+      // Coerce and sanitize bind parameters to avoid undefined values
+      const issuedAtNum = issuedAt ? Number(issuedAt) : Math.floor(Date.now());
+      const expiresAtNum = (expiresAt === null || expiresAt === undefined) ? null : Number(expiresAt);
+      const ttlNum = (ttl === null || ttl === undefined) ? null : Number(ttl);
+      const oneTimeFlag = oneTimeUse ? 1 : 0;
+      const metadataStr = metadata ? JSON.stringify(metadata) : null;
+
+      const bindParams = [
+        tokenId,                              // 1: token_id
+        type,                                 // 2: type
+        resourceId,                           // 3: resource_id
+        resourceName || resourceId,           // 4: resource_name
+        systemId,                             // 5: system_id
+        issuedAtNum,                          // 6: issued_at
+        expiresAtNum,                         // 7: expires_at (can be NULL)
+        ttlNum,                               // 8: ttl (can be NULL)
+        oneTimeFlag,                          // 9: one_time_use
+        0,                                    // 10: used (always 0 for new tokens)
+        metadataStr,                          // 11: metadata
+        signature,                            // 12: signature
+        filePath || null,                     // 13: file_path (can be NULL)
+        fileHash || null                      // 14: file_hash (can be NULL)
+      ];
+
+      console.log('[Database] Bind parameters TYPES:', bindParams.map((p, i) => `${i + 1}: ${p === null ? 'NULL' : typeof p + ' = ' + p}`));
+
+      stmt = this.db.prepare(
+        `INSERT INTO verification_tokens 
+         (token_id, type, resource_id, resource_name, system_id, issued_at, expires_at, ttl, one_time_use, used, metadata, signature, file_path, file_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+
+      // Replace any undefined with null to satisfy SQL.js binding
+      const sanitizedParams = bindParams.map(p => (p === undefined ? null : p));
+
+      console.log('[Database] About to bind sanitized params');
+      try {
+        stmt.bind(sanitizedParams);
+        console.log('[Database] Bind successful');
+      } catch (bindError) {
+        console.error('[Database] BIND FAILED:', bindError.message);
+        throw bindError;
+      }
+
+      console.log('[Database] About to execute statement');
+      try {
+        // Execute the statement
+        const stepResult = stmt.step();
+        console.log('[Database] Step result:', stepResult);
+      } catch (stepError) {
+        console.error('[Database] STEP FAILED:', stepError.message);
+        console.error('[Database] This usually means a constraint violation or data type mismatch');
+        throw stepError;
+      }
+
+      // Free statement before saving
+      stmt.free();
+      stmt = null;
+
+      console.log('[Database] About to save database');
+      // Force immediate save for verification tokens (critical data)
+      this.saveDatabaseImmediate();
+
+      console.log('[Database] Token added and saved successfully');
+      return true;
+    } catch (error) {
+      console.error('[Database] CRITICAL ERROR adding verification token:', error);
+      console.error('[Database] Error name:', error.name);
+      console.error('[Database] Error message:', error.message);
+      console.error('[Database] Error stack:', error.stack);
+      console.error('[Database] Input parameters that caused error:', {
+        tokenId, type, resourceId, resourceName, systemId, 
+        issuedAt, expiresAt, ttl, oneTimeUse, metadata, signature, filePath, fileHash
+      });
+      
+      // Clean up statement if error occurred
+      if (stmt) {
+        try {
+          stmt.free();
+        } catch (e) {
+          console.error('[Database] Error freeing statement:', e);
+        }
+      }
+      
+      return false;
+    }
+  }
+
+  getVerificationToken(tokenId) {
+    try {
+      const stmt = this.db.prepare(
+        'SELECT * FROM verification_tokens WHERE token_id = ?'
+      );
+      stmt.bind([tokenId]);
+      if (stmt.step()) {
+        const row = stmt.getAsObject();
+        stmt.free();
+        return row;
+      }
+      stmt.free();
+      return null;
+    } catch (error) {
+      console.error('Failed to get verification token:', error);
+      return null;
+    }
+  }
+
+  markTokenAsUsed(tokenId) {
+    try {
+      const now = Date.now();
+      const stmt = this.db.prepare(
+        'UPDATE verification_tokens SET used = 1, used_at = ? WHERE token_id = ?'
+      );
+      stmt.bind([now, tokenId]);
+      stmt.step();
+      stmt.free();
+      this.saveDatabase();
+      return true;
+    } catch (error) {
+      console.error('Failed to mark token as used:', error);
+      return false;
+    }
+  }
+
+  getAllVerificationTokens(filters = {}) {
+    try {
+      let query = 'SELECT * FROM verification_tokens WHERE 1=1';
+      const params = [];
+
+      if (filters.type) {
+        query += ' AND type = ?';
+        params.push(filters.type);
+      }
+
+      if (filters.resourceId) {
+        query += ' AND resource_id = ?';
+        params.push(filters.resourceId);
+      }
+
+      if (filters.used !== undefined) {
+        query += ' AND used = ?';
+        params.push(filters.used ? 1 : 0);
+      }
+
+      query += ' ORDER BY issued_at DESC';
+
+      if (filters.limit) {
+        query += ' LIMIT ?';
+        params.push(filters.limit);
+      }
+
+      const stmt = this.db.prepare(query);
+      stmt.bind(params);
+
+      const tokens = [];
+      while (stmt.step()) {
+        tokens.push(stmt.getAsObject());
+      }
+      stmt.free();
+
+      return tokens;
+    } catch (error) {
+      console.error('Failed to get verification tokens:', error);
+      return [];
+    }
+  }
+
+  deleteExpiredTokens() {
+    try {
+      const now = Date.now();
+      const stmt = this.db.prepare(
+        'DELETE FROM verification_tokens WHERE expires_at IS NOT NULL AND expires_at < ?'
+      );
+      stmt.bind([now]);
+      stmt.step();
+      stmt.free();
+      this.saveDatabase();
+      return true;
+    } catch (error) {
+      console.error('Failed to delete expired tokens:', error);
+      return false;
+    }
+  }
+
   getLogs(type = null, limit = 100) {
     let query = 'SELECT * FROM logs';
     const params = [];
@@ -1045,12 +1467,12 @@ class DatabaseService {
     );
     stmt.bind([
       data.name,
-      data.sourcePath,
-      data.backupPath,
+      data.source_path || data.sourcePath,
+      data.backup_path || data.backupPath,
       data.size,
-      data.fileCount,
+      data.file_count || data.fileCount,
       data.encrypted ? 1 : 0,
-      JSON.stringify(data.manifest)
+      data.manifest
     ]);
     stmt.step();
     stmt.free();
@@ -1058,9 +1480,20 @@ class DatabaseService {
     return { success: true };
   }
 
-  getBackups(limit = 50) {
-    const stmt = this.db.prepare('SELECT * FROM backups ORDER BY created_at DESC LIMIT ?');
-    stmt.bind([limit]);
+  getBackups(filters = {}, limit = 50) {
+    let query = 'SELECT * FROM backups';
+    const params = [];
+    
+    if (filters.source_path) {
+      query += ' WHERE source_path = ?';
+      params.push(filters.source_path);
+    }
+    
+    query += ' ORDER BY created_at DESC LIMIT ?';
+    params.push(limit);
+    
+    const stmt = this.db.prepare(query);
+    stmt.bind(params);
     const results = [];
     while (stmt.step()) {
       results.push(stmt.getAsObject());
@@ -1079,6 +1512,15 @@ class DatabaseService {
     }
     stmt.free();
     return null;
+  }
+
+  deleteBackup(id) {
+    const stmt = this.db.prepare('DELETE FROM backups WHERE id = ?');
+    stmt.bind([id]);
+    stmt.step();
+    stmt.free();
+    this.saveDatabase();
+    return { success: true };
   }
 
   /**
@@ -1118,14 +1560,506 @@ class DatabaseService {
   }
 
   /**
-   * Close database connection
+   * Conversion operations
+   */
+  logConversion(data) {
+    const stmt = this.db.prepare(`
+      INSERT INTO conversions (
+        input_path, output_path, input_format, output_format, 
+        input_size, output_size, hash_before, hash_after, 
+        encrypted, compressed, duration, status, error, timestamp
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    
+    stmt.bind([
+      data.input_path,
+      data.output_path,
+      data.input_format,
+      data.output_format,
+      data.input_size || null,
+      data.output_size || null,
+      data.hash_before || null,
+      data.hash_after || null,
+      data.encrypted ? 1 : 0,
+      data.compressed ? 1 : 0,
+      data.duration || null,
+      data.status,
+      data.error || null,
+      data.timestamp
+    ]);
+    
+    stmt.step();
+    const lastId = this.db.exec('SELECT last_insert_rowid() as id')[0].values[0][0];
+    stmt.free();
+    this.saveDatabase();
+    return { success: true, id: lastId };
+  }
+
+  getConversions(limit = 50) {
+    const stmt = this.db.prepare(`
+      SELECT * FROM conversions 
+      ORDER BY timestamp DESC 
+      LIMIT ?
+    `);
+    stmt.bind([limit]);
+    const results = [];
+    while (stmt.step()) {
+      results.push(stmt.getAsObject());
+    }
+    stmt.free();
+    return results;
+  }
+
+  getConversionById(id) {
+    const stmt = this.db.prepare('SELECT * FROM conversions WHERE id = ?');
+    stmt.bind([id]);
+    if (stmt.step()) {
+      const row = stmt.getAsObject();
+      stmt.free();
+      return row;
+    }
+    stmt.free();
+    return null;
+  }
+
+  getConversionStats() {
+    const stmt = this.db.prepare(`
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+        SUM(input_size) as total_input_size,
+        SUM(output_size) as total_output_size
+      FROM conversions
+    `);
+    
+    if (stmt.step()) {
+      const row = stmt.getAsObject();
+      stmt.free();
+      return row;
+    }
+    stmt.free();
+    return { total: 0, completed: 0, failed: 0, total_input_size: 0, total_output_size: 0 };
+  }
+
+  deleteConversion(id) {
+    const stmt = this.db.prepare('DELETE FROM conversions WHERE id = ?');
+    stmt.bind([id]);
+    stmt.step();
+    stmt.free();
+    this.saveDatabase();
+    return { success: true };
+  }
+
+  /**
+   * Get all backups for resource selection
+   * @returns {Array} List of backups with id, name, size, created_at
+   */
+  getBackupsForSelection() {
+    try {
+      const stmt = this.db.prepare(
+        'SELECT id, name, source_path, backup_path, size, file_count, encrypted, created_at FROM backups ORDER BY created_at DESC'
+      );
+      const results = [];
+      while (stmt.step()) {
+        results.push(stmt.getAsObject());
+      }
+      stmt.free();
+      return results;
+    } catch (error) {
+      console.error('Failed to get backups for selection:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get conversion history for resource selection
+   * @returns {Array} List of converted files
+   */
+  getConversionHistoryForSelection() {
+    try {
+      const stmt = this.db.prepare(
+        `SELECT id, input_path, output_path, input_format, output_format, 
+         input_size, output_size, hash_after, timestamp, status 
+         FROM conversions 
+         WHERE status = 'completed'
+         ORDER BY timestamp DESC 
+         LIMIT 100`
+      );
+      const results = [];
+      while (stmt.step()) {
+        results.push(stmt.getAsObject());
+      }
+      stmt.free();
+      return results;
+    } catch (error) {
+      console.error('Failed to get conversion history:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get diagnostic reports for resource selection
+   * NOTE: Diagnostic reports are stored as logs. This fetches diagnostic-type logs.
+   * @returns {Array} List of diagnostic reports
+   */
+  getDiagnosticReportsForSelection() {
+    try {
+      const stmt = this.db.prepare(
+        `SELECT id, type, message, metadata, timestamp 
+         FROM logs 
+         WHERE type LIKE '%diagnostic%' OR type LIKE '%system%' OR type LIKE '%health%'
+         ORDER BY timestamp DESC 
+         LIMIT 50`
+      );
+      const results = [];
+      while (stmt.step()) {
+        results.push(stmt.getAsObject());
+      }
+      stmt.free();
+      return results;
+    } catch (error) {
+      console.error('Failed to get diagnostic reports:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Battery Usage History Methods
+   */
+  
+  /**
+   * Record app usage snapshot for battery tracking
+   */
+  recordAppUsage(appName, appCommand, pid, sessionId, cpuPercent, memoryPercent, batteryImpact) {
+    try {
+      const now = Date.now();
+      const dateKey = new Date(now).toISOString().split('T')[0]; // YYYY-MM-DD format
+      
+      const stmt = this.db.prepare(
+        `INSERT INTO app_usage_history 
+        (app_name, app_command, pid, session_id, cpu_percent, memory_percent, battery_impact, timestamp, date_key) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      stmt.run([appName, appCommand, pid, sessionId, cpuPercent, memoryPercent, batteryImpact, Math.floor(now / 1000), dateKey]);
+      stmt.free();
+      
+      this.saveDatabase();
+      return true;
+    } catch (error) {
+      console.error('Failed to record app usage:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Start a new app usage session
+   */
+  startAppSession(sessionId, appName, appCommand, pid) {
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      
+      const stmt = this.db.prepare(
+        `INSERT INTO app_usage_sessions 
+        (session_id, app_name, app_command, pid, start_time, is_active) 
+        VALUES (?, ?, ?, ?, ?, 1)`
+      );
+      stmt.run([sessionId, appName, appCommand, pid, now]);
+      stmt.free();
+      
+      this.saveDatabase();
+      return true;
+    } catch (error) {
+      console.error('Failed to start app session:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Update app session with usage metrics
+   */
+  updateAppSession(sessionId, cpuDelta, memoryDelta, batteryImpactDelta) {
+    try {
+      const stmt = this.db.prepare(
+        `UPDATE app_usage_sessions 
+        SET total_cpu = total_cpu + ?, 
+            total_memory = total_memory + ?, 
+            total_battery_impact = total_battery_impact + ?,
+            samples_count = samples_count + 1
+        WHERE session_id = ? AND is_active = 1`
+      );
+      stmt.run([cpuDelta, memoryDelta, batteryImpactDelta, sessionId]);
+      stmt.free();
+      
+      this.saveDatabase();
+      return true;
+    } catch (error) {
+      console.error('Failed to update app session:', error);
+      return false;
+    }
+  }
+
+  /**
+   * End an app usage session
+   */
+  endAppSession(sessionId) {
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      
+      const stmt = this.db.prepare(
+        `UPDATE app_usage_sessions 
+        SET end_time = ?, is_active = 0 
+        WHERE session_id = ? AND is_active = 1`
+      );
+      stmt.run([now, sessionId]);
+      stmt.free();
+      
+      this.saveDatabase();
+      return true;
+    } catch (error) {
+      console.error('Failed to end app session:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Get historical app usage for a timeframe
+   * @param {string} timeframe - 'today', 'yesterday', 'last_week', 'last_month'
+   * @returns {Array} App usage data grouped by app
+   */
+  getHistoricalAppUsage(timeframe) {
+    try {
+      const now = new Date();
+      let startTime, endTime;
+      
+      switch (timeframe) {
+        case 'today':
+          // Today: from midnight today to now
+          const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(todayStart.getTime() / 1000);
+          endTime = Math.floor(Date.now() / 1000);
+          break;
+          
+        case 'yesterday':
+          // Yesterday: from midnight yesterday to midnight today
+          const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0);
+          const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(yesterdayStart.getTime() / 1000);
+          endTime = Math.floor(yesterdayEnd.getTime() / 1000);
+          break;
+          
+        case 'last_week':
+          // Last 7 days: from 7 days ago midnight to yesterday midnight (excluding today)
+          const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7, 0, 0, 0);
+          const weekEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(weekStart.getTime() / 1000);
+          endTime = Math.floor(weekEnd.getTime() / 1000);
+          break;
+          
+        case 'last_month':
+          // Last 30 days: from 30 days ago midnight to yesterday midnight (excluding today)
+          const monthStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30, 0, 0, 0);
+          const monthEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(monthStart.getTime() / 1000);
+          endTime = Math.floor(monthEnd.getTime() / 1000);
+          break;
+          
+        default:
+          // Default to today
+          const defaultStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(defaultStart.getTime() / 1000);
+          endTime = Math.floor(Date.now() / 1000);
+      }
+      
+      return this.getHistoricalAppUsageRange(startTime, endTime);
+    } catch (error) {
+      console.error('Failed to get historical app usage:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get historical app usage for a specific time range
+   */
+  getHistoricalAppUsageRange(startTime, endTime) {
+    try {
+      const startDate = new Date(startTime * 1000);
+      const endDate = new Date(endTime * 1000);
+      console.log(`[DB Query] getHistoricalAppUsageRange: ${startDate.toLocaleString()} to ${endDate.toLocaleString()}`);
+      
+      const stmt = this.db.prepare(
+        `SELECT 
+          app_name,
+          app_command,
+          COUNT(*) as samples,
+          AVG(cpu_percent) as avg_cpu,
+          AVG(memory_percent) as avg_memory,
+          SUM(battery_impact) as total_battery_impact,
+          MAX(battery_impact) as peak_battery_impact
+        FROM app_usage_history
+        WHERE timestamp >= ? AND timestamp < ?
+        GROUP BY app_name
+        ORDER BY total_battery_impact DESC
+        LIMIT 20`
+      );
+      stmt.bind([startTime, endTime]);
+      
+      const results = [];
+      while (stmt.step()) {
+        results.push(stmt.getAsObject());
+      }
+      stmt.free();
+      
+      console.log(`[DB Query] Found ${results.length} apps in this range`);
+      
+      return results;
+    } catch (error) {
+      console.error('Failed to get historical app usage range:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get total battery impact for a timeframe (for percentage calculations)
+   */
+  getTotalBatteryImpact(timeframe) {
+    try {
+      const now = new Date();
+      let startTime, endTime;
+      
+      switch (timeframe) {
+        case 'today':
+          // Today: from midnight today to now
+          const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(todayStart.getTime() / 1000);
+          endTime = Math.floor(Date.now() / 1000);
+          break;
+          
+        case 'yesterday':
+          // Yesterday: from midnight yesterday to midnight today
+          const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0);
+          const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(yesterdayStart.getTime() / 1000);
+          endTime = Math.floor(yesterdayEnd.getTime() / 1000);
+          break;
+          
+        case 'last_week':
+          // Last 7 days: from 7 days ago midnight to yesterday midnight (excluding today)
+          const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7, 0, 0, 0);
+          const weekEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(weekStart.getTime() / 1000);
+          endTime = Math.floor(weekEnd.getTime() / 1000);
+          break;
+          
+        case 'last_month':
+          // Last 30 days: from 30 days ago midnight to yesterday midnight (excluding today)
+          const monthStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30, 0, 0, 0);
+          const monthEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(monthStart.getTime() / 1000);
+          endTime = Math.floor(monthEnd.getTime() / 1000);
+          break;
+          
+        default:
+          // Default to today
+          const defaultStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(defaultStart.getTime() / 1000);
+          endTime = Math.floor(Date.now() / 1000);
+      }
+      
+      return this.getTotalBatteryImpactRange(startTime, endTime);
+    } catch (error) {
+      console.error('Failed to get total battery impact:', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Get total battery impact for a specific time range
+   */
+  getTotalBatteryImpactRange(startTime, endTime) {
+    try {
+      const stmt = this.db.prepare(
+        `SELECT SUM(battery_impact) as total 
+        FROM app_usage_history 
+        WHERE timestamp >= ? AND timestamp < ?`
+      );
+      stmt.bind([startTime, endTime]);
+      
+      let total = 0;
+      if (stmt.step()) {
+        const row = stmt.getAsObject();
+        total = row.total || 0;
+      }
+      stmt.free();
+      
+      return total;
+    } catch (error) {
+      console.error('Failed to get total battery impact range:', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Clean up old app usage data (older than 30 days)
+   */
+  cleanupOldAppUsageData() {
+    try {
+      const thirtyDaysAgo = Math.floor(Date.now() / 1000) - (30 * 24 * 60 * 60);
+      
+      // Clean up history
+      const stmtHistory = this.db.prepare(
+        'DELETE FROM app_usage_history WHERE timestamp < ?'
+      );
+      stmtHistory.run([thirtyDaysAgo]);
+      stmtHistory.free();
+      
+      // Clean up inactive sessions
+      const stmtSessions = this.db.prepare(
+        'DELETE FROM app_usage_sessions WHERE start_time < ? AND is_active = 0'
+      );
+      stmtSessions.run([thirtyDaysAgo]);
+      stmtSessions.free();
+      
+      this.saveDatabase();
+      console.log('Cleaned up app usage data older than 30 days');
+      return true;
+    } catch (error) {
+      console.error('Failed to cleanup old app usage data:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Get active app sessions count
+   */
+  getActiveSessionsCount() {
+    try {
+      const stmt = this.db.prepare(
+        'SELECT COUNT(*) as count FROM app_usage_sessions WHERE is_active = 1'
+      );
+      
+      let count = 0;
+      if (stmt.step()) {
+        const row = stmt.getAsObject();
+        count = row.count || 0;
+      }
+      stmt.free();
+      
+      return count;
+    } catch (error) {
+      console.error('Failed to get active sessions count:', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Close database and cleanup
    */
   close() {
     if (this.db) {
-      // Force immediate save before closing
       this.saveDatabaseImmediate();
       this.db.close();
-      console.log('Database connection closed');
+      this.db = null;
     }
   }
 }

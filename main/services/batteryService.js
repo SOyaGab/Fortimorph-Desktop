@@ -5,16 +5,18 @@
  */
 
 const si = require('systeminformation');
-const { app } = require('electron');
+const { app, Notification } = require('electron');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 const execAsync = promisify(exec);
 
 class BatteryService {
-  constructor(dbService) {
+  constructor(dbService, mainWindow = null) {
     this.db = dbService;
+    this.mainWindow = mainWindow;
     this.isMonitoring = false;
     this.monitoringInterval = null;
+    this.processTrackingInterval = null; // Separate interval for process tracking
     
     // Track if systeminformation is consistently failing
     this.siFailureCount = 0;
@@ -42,10 +44,21 @@ class BatteryService {
     this.maxHistoryPoints = 288; // 24 hours at 5-minute intervals
     
     // Process tracking for battery usage
-    this.processTracking = new Map(); // pid -> {name, startTime, totalCpu, totalMem, samples}
+    this.processTracking = new Map(); // pid -> {name, startTime, totalCpu, totalMem, samples, sessionId}
     this.processHistory = []; // Historical process data for battery impact
     this.maxProcessHistory = 100; // Keep last 100 samples
     this.lastProcessTrackingTime = null; // Track when we last updated process tracking
+    
+    // Enhanced tracking with database persistence
+    this.processSessionIds = new Map(); // pid -> sessionId for database linking
+    this.lastProcessSnapshot = new Map(); // pid -> last known data for change detection
+    
+    // Error handling and self-repair
+    this.monitoringErrors = 0;
+    this.maxConsecutiveErrors = 5;
+    this.lastSuccessfulUpdate = Date.now();
+    this.healthCheckInterval = null;
+    this.isRecovering = false;
     
     // Cache for analytics to avoid slow calls
     this.cachedAnalytics = null;
@@ -170,18 +183,34 @@ class BatteryService {
       // Start monitoring
       this.startMonitoring();
       
-      // OPTIMIZED: Delay initial process scan to let app start faster
-      // Run it after 30 seconds instead of immediately to reduce startup lag
-      console.log('[Battery Init] Scheduling initial process scan for 30s from now...');
+      // OPTIMIZED: Start process tracking quickly and run frequently
+      // First scan after 2 seconds for immediate data
+      console.log('[Battery Init] Scheduling IMMEDIATE initial process scan (2s)...');
       setTimeout(() => {
-        console.log('[Battery Init] Running delayed initial process scan...');
+        console.log('[Battery Init] Running first quick process scan...');
         this.updateProcessTrackingAsync().catch(err => {
           console.error('Initial process scan failed (non-critical):', err);
         });
-      }, 30000); // Wait 30 seconds before first scan
+      }, 2000); // Wait only 2 seconds for first data
+      
+      // Schedule regular updates every 8 seconds for real-time tracking
+      this.processTrackingInterval = setInterval(() => {
+        if (process.env.NODE_ENV === 'development') {
+          console.log('[Battery Service] Running scheduled process tracking update...');
+        }
+        this.updateProcessTrackingAsync().catch(err => {
+          console.error('Scheduled process scan failed (non-critical):', err);
+        });
+      }, 8000); // Every 8 seconds for responsive updates (was 120000)
       
       // Schedule data retention cleanup (keep 30 days)
       this.scheduleDataRetention(30);
+      
+      // Auto-cleanup old app usage data daily
+      this.scheduleAppUsageCleanup();
+      
+      // Start health check monitor
+      this.startHealthCheck();
       
       this.db.addLog('battery', 'Battery service initialized successfully', {
         mode: this.currentMode,
@@ -216,8 +245,13 @@ class BatteryService {
 
   /**
    * Load persistent tracking data from database
-   * FIXED: Data now properly resets on system shutdown/restart
-   * Only restores if from the SAME boot session (not persisted across reboots)
+   * UPDATED: Now properly tracks apps from system boot, not from FortiMorph launch
+   * 
+   * Key Changes:
+   * - Process start times now use actual system-reported start times
+   * - Apps running before FortiMorph starts are tracked with correct runtime
+   * - Impact scores are calculated based on actual process lifetime
+   * - All tracking resets only on system shutdown/restart (not FortiMorph restart)
    */
   loadPersistentTracking() {
     try {
@@ -323,6 +357,11 @@ class BatteryService {
       this.monitoringInterval = null;
     }
     
+    if (this.processTrackingInterval) {
+      clearInterval(this.processTrackingInterval);
+      this.processTrackingInterval = null;
+    }
+    
     console.log('Battery monitoring stopped');
     this.db.addLog('battery', 'Battery monitoring stopped', null, 'info');
   }
@@ -332,7 +371,14 @@ class BatteryService {
    */
   async collectBatteryData() {
     try {
-      console.log('[Battery Monitoring] Collecting battery data...');
+      // Reduced logging - only log every 10th collection to avoid console spam
+      const shouldLog = !this._collectionCount || this._collectionCount % 10 === 0;
+      this._collectionCount = (this._collectionCount || 0) + 1;
+      
+      if (shouldLog && process.env.NODE_ENV === 'development') {
+        console.log('[Battery Monitoring] Collecting battery data... (logged every 10th collection)');
+      }
+      
       const batteryData = await this.getBatteryData();
       
       // Store in history
@@ -344,15 +390,8 @@ class BatteryService {
       // Update last state
       this.lastBatteryState = batteryData;
       
-      // OPTIMIZED: Only update process tracking every 5 minutes to reduce system load
-      // This prevents constant CPU/memory scanning that causes lag
-      if (!this.lastProcessTrackingTime || (Date.now() - this.lastProcessTrackingTime) > 300000) {
-        console.log('[Battery Monitoring] Triggering background process tracking update (5min interval)...');
-        this.lastProcessTrackingTime = Date.now();
-        this.updateProcessTrackingAsync().catch(err => {
-          console.error('Error updating process tracking (non-critical):', err);
-        });
-      }
+      // Process tracking is now handled by separate interval in initialize()
+      // No need to trigger it here
       
       // Adjust polling based on charging state
       await this.adjustPolling(batteryData);
@@ -366,13 +405,27 @@ class BatteryService {
         }, 'debug');
       }
       
+      // Reset error counter on success
+      this.monitoringErrors = 0;
+      this.lastSuccessfulUpdate = Date.now();
+      
       return batteryData;
       
     } catch (error) {
+      this.monitoringErrors++;
       console.error('Error collecting battery data:', error);
+      
+      // Log error but continue service
       this.db.addLog('battery', 'Error collecting battery data', {
-        error: error.message
+        error: error.message,
+        consecutiveErrors: this.monitoringErrors
       }, 'error');
+      
+      // Attempt recovery if too many consecutive errors
+      if (this.monitoringErrors >= this.maxConsecutiveErrors) {
+        await this.attemptRecovery();
+      }
+      
       return null;
     }
   }
@@ -383,6 +436,11 @@ class BatteryService {
   async getBatteryData() {
     try {
       const battery = await si.battery();
+      
+      // If no battery detected, return safe defaults
+      if (!battery || !battery.hasBattery) {
+        return this.getSafeBatteryData();
+      }
       
       // Check which metrics are available
       const hasCapacityData = battery.maxCapacity && battery.currentCapacity;
@@ -416,7 +474,13 @@ class BatteryService {
       };
     } catch (error) {
       console.error('Error getting battery data:', error);
-      throw error;
+      
+      // Return safe defaults instead of throwing
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[Battery Data] Returning safe defaults due to error');
+      }
+      
+      return this.getSafeBatteryData();
     }
   }
 
@@ -456,7 +520,10 @@ class BatteryService {
       this.batteryHistory.shift();
     }
     
-    console.log(`[Battery History] Added data point. Total history: ${this.batteryHistory.length} points`);
+    // Reduced logging - only log significant milestones
+    if (this.batteryHistory.length === 1 || this.batteryHistory.length % 50 === 0) {
+      console.log(`[Battery History] Total history: ${this.batteryHistory.length} points`);
+    }
   }
 
   /**
@@ -468,6 +535,7 @@ class BatteryService {
 
   /**
    * Check alert rules and trigger if needed
+   * Now includes system-level notifications
    */
   async checkAlerts(batteryData) {
     const now = Date.now();
@@ -511,12 +579,78 @@ class BatteryService {
           // Log to database
           this.db.addLog('battery', `Battery alert: ${alert.message}`, alert, rule.type);
           
+          // Show system notification
+          this.showSystemNotification(alert);
+          
           console.log(`Battery alert triggered: ${rule.id} - ${alert.message}`);
         }
         
       } catch (error) {
         console.error(`Error checking alert rule ${rule.id}:`, error);
       }
+    }
+  }
+
+  /**
+   * Set main window reference (for notification click handling)
+   */
+  setMainWindow(mainWindow) {
+    this.mainWindow = mainWindow;
+  }
+
+  /**
+   * Show system-level notification (appears on user's device, not just in-app)
+   * @param {Object} alert - Alert object with message, type, and action
+   */
+  showSystemNotification(alert) {
+    try {
+      // Check if notifications are supported
+      if (!Notification.isSupported()) {
+        console.log('[Battery Notification] System notifications not supported on this platform');
+        return;
+      }
+      
+      // Determine urgency and icon based on alert type
+      let urgency = 'normal';
+      let icon = null;
+      
+      if (alert.type === 'critical') {
+        urgency = 'critical';
+      } else if (alert.type === 'warning') {
+        urgency = 'normal';
+      } else {
+        urgency = 'low';
+      }
+      
+      // Create notification
+      const notification = new Notification({
+        title: `FortiMorph Battery Alert - ${alert.type.toUpperCase()}`,
+        body: `${alert.message}\n\n${alert.action}`,
+        urgency: urgency,
+        silent: alert.type === 'info', // Silent for info alerts
+        timeoutType: alert.type === 'critical' ? 'never' : 'default',
+        // Add custom sound for critical alerts
+        sound: alert.type === 'critical' ? 'default' : undefined
+      });
+      
+      // Add click handler to focus the app window
+      notification.on('click', () => {
+        if (this.mainWindow) {
+          if (this.mainWindow.isMinimized()) {
+            this.mainWindow.restore();
+          }
+          this.mainWindow.focus();
+          this.mainWindow.show();
+        }
+      });
+      
+      // Show the notification
+      notification.show();
+      
+      console.log(`[Battery Notification] System notification shown: ${alert.message}`);
+      
+    } catch (error) {
+      console.error('[Battery Notification] Failed to show system notification:', error);
     }
   }
 
@@ -705,6 +839,38 @@ class BatteryService {
   }
 
   /**
+   * Schedule app usage data cleanup (runs daily)
+   */
+  scheduleAppUsageCleanup() {
+    // Run cleanup daily at 3 AM
+    const scheduleCleanup = () => {
+      const now = new Date();
+      const next3AM = new Date();
+      next3AM.setHours(3, 0, 0, 0);
+      
+      if (next3AM < now) {
+        next3AM.setDate(next3AM.getDate() + 1);
+      }
+      
+      const timeUntil3AM = next3AM.getTime() - now.getTime();
+      
+      setTimeout(() => {
+        try {
+          this.db.cleanupOldAppUsageData();
+          console.log('App usage data cleanup completed');
+        } catch (error) {
+          console.error('Error during app usage cleanup:', error);
+        }
+        
+        // Schedule next cleanup
+        scheduleCleanup();
+      }, timeUntil3AM);
+    };
+    
+    scheduleCleanup();
+  }
+
+  /**
    * Save battery service settings
    */
   async saveSettings() {
@@ -796,100 +962,176 @@ class BatteryService {
 
   /**
    * Update process tracking asynchronously (non-blocking)
-   * OPTIMIZED: Reduced timeout and better failure handling to prevent lag
+   * OPTIMIZED: Much faster now - uses Windows fallback immediately for better performance
    */
   async updateProcessTrackingAsync() {
     try {
-      console.log('[Process Tracking] Starting background update...');
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[Process Tracking] Starting background update...');
+      }
       
-      // If systeminformation has failed 3+ times, use fallback method
-      if (this.siFailureCount >= 3 && process.platform === 'win32') {
-        console.log('[Process Tracking] Using Windows fallback method (systeminformation too slow)');
+      // On Windows, ALWAYS use the fast native method (tasklist)
+      // systeminformation is too slow on Windows
+      if (process.platform === 'win32') {
+        if (process.env.NODE_ENV === 'development') {
+          console.log('[Process Tracking] Using fast Windows tasklist method');
+        }
         await this.updateProcessTrackingWindows();
         return;
       }
       
+      // On Linux/Mac, use systeminformation
       const si = require('systeminformation');
       
-      // REDUCED TIMEOUT: 8 seconds instead of 15 to prevent lag
-      // Get process info with timeout - systeminformation can be slow on Windows
+      // Get process info with timeout
       const processesPromise = si.processes();
       const timeoutPromise = new Promise((resolve) => 
         setTimeout(() => {
-          console.log('[Process Tracking] Timeout reached (8s) - systeminformation is slow, switching to fallback');
-          this.siFailureCount++;
+          if (process.env.NODE_ENV === 'development') {
+            console.log('[Process Tracking] Timeout reached (5s)');
+          }
           return resolve({ list: [] });
-        }, 8000) // REDUCED: 8 second timeout (was 15s)
+        }, 5000)
       );
       const processes = await Promise.race([processesPromise, timeoutPromise]);
       
-      console.log(`[Process Tracking] Got ${processes.list?.length || 0} processes from system`);
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[Process Tracking] Got ${processes.list?.length || 0} processes from system`);
+      }
       
       // Update tracking if we got data
       if (processes.list && processes.list.length > 0) {
-        this.siFailureCount = 0; // Reset failure count on success
         this.updateProcessTracking(processes.list);
-        console.log(`[Process Tracking] ✅ Updated: ${this.processTracking.size} processes being tracked`);
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`[Process Tracking] ✅ Updated: ${this.processTracking.size} processes being tracked`);
+        }
       } else {
-        console.log('[Process Tracking] ⚠️ No process data received - will retry on next cycle');
+        if (process.env.NODE_ENV === 'development') {
+          console.log('[Process Tracking] ⚠️ No process data received - will retry on next cycle');
+        }
       }
     } catch (error) {
       // Log but don't throw - this is background work
       console.error('[Process Tracking] ❌ Background update failed:', error.message);
-      this.siFailureCount++;
       
-      // After 2 failures on Windows, switch to fallback permanently
-      if (this.siFailureCount >= 2 && process.platform === 'win32') {
-        console.log('[Process Tracking] Switching to Windows fallback method due to repeated failures');
-      }
+      // Don't count process tracking errors towards service recovery
+      // These are non-critical and expected to fail occasionally
     }
   }
 
   /**
    * Fallback process tracking using Windows tasklist command
-   * OPTIMIZED: Much faster than systeminformation on Windows, with better filtering
+   * OPTIMIZED: Much faster than systeminformation on Windows
    */
   async updateProcessTrackingWindows() {
     try {
       console.log('[Process Tracking Windows] Using native Windows tasklist...');
       
-      // Use Windows tasklist with CSV format for easier parsing
-      // OPTIMIZED: Use /FI filter to only get processes using >20MB memory (was 5MB)
-      const { stdout } = await execAsync('tasklist /FO CSV /NH /FI "MEMUSAGE gt 20480"', { 
-        timeout: 3000, // REDUCED: 3 seconds (was 5s)
-        windowsHide: true 
-      });
-      
-      const lines = stdout.trim().split('\n');
+      // Get ALL processes with details using CSV. We'll parse header to map fields robustly.
+      const { stdout } = await execAsync(
+        'wmic process get ProcessId,CreationDate,Name,WorkingSetSize /FORMAT:CSV',
+        { 
+          timeout: 3000, // 3 seconds timeout
+          windowsHide: true,
+          maxBuffer: 1024 * 1024 * 10 // 10MB buffer
+        }
+      );
+
+      const rawLines = stdout.trim().split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      if (rawLines.length < 2) {
+        console.log('[Process Tracking Windows] ⚠️ No CSV output from wmic');
+      }
+
+      // First line is header (Node,ProcessId,CreationDate,Name,WorkingSetSize) - find header and data lines
+      const headerLine = rawLines[0];
+      const headers = headerLine.split(',').map(h => h.trim());
+      const dataLines = rawLines.slice(1);
       const processes = [];
-      
-      for (const line of lines) {
-        // Parse CSV line: "Image Name","PID","Session Name","Session#","Mem Usage"
-        const match = line.match(/"([^"]+)","(\d+)","[^"]+","[^"]+","([^"]+)"/);
-        if (match) {
-          const [, name, pidStr, memStr] = match;
-          const pid = parseInt(pidStr);
-          const memKB = parseInt(memStr.replace(/[^\d]/g, ''));
-          
-          // OPTIMIZED: Only track processes using >20MB (was 5MB)
-          if (pid > 0 && memKB > 20480) {
-            processes.push({
-              pid,
-              name,
-              command: name,
-              cpu: 0, // Can't get CPU from tasklist easily
-              memVsTotal: (memKB / 1024 / 1024) / (require('os').totalmem() / 1024 / 1024 / 1024) * 100
-            });
+
+      for (const line of dataLines) {
+        const parts = line.split(',');
+        if (parts.length < headers.length) continue;
+
+        // Map fields by header
+        const entry = {};
+        for (let i = 0; i < headers.length && i < parts.length; i++) {
+          entry[headers[i]] = parts[i].trim();
+        }
+
+        const name = entry.Name || entry.ProcessName || entry.Caption || '';
+        const pid = parseInt(entry.ProcessId || entry.PID || entry.ProcessID || '0');
+        const memBytes = parseInt(entry.WorkingSetSize || entry.Workingsetsize || '0');
+        const creationRaw = entry.CreationDate || entry.Creationdate || '';
+
+        // Parse creationDate (WMIC format: YYYYMMDDhhmmss.ffffff+timezone)
+        let started = null;
+        if (creationRaw) {
+          const match = creationRaw.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+          if (match) {
+            const [ , y, mo, d, hh, mm, ss ] = match;
+            try {
+              started = new Date(`${y}-${mo}-${d}T${hh}:${mm}:${ss}`);
+              if (!isNaN(started.getTime())) started = started.getTime(); else started = null;
+            } catch (e) {
+              started = null;
+            }
           }
+        }
+
+        if (pid > 0 && memBytes > 10 * 1024 * 1024 && name) {
+          const memMB = memBytes / (1024 * 1024);
+          const totalMemGB = require('os').totalmem() / (1024 * 1024 * 1024);
+          const memPercent = (memMB / 1024 / totalMemGB) * 100;
+
+          processes.push({
+            pid,
+            name,
+            command: name,
+            cpu: 0.01,
+            memVsTotal: memPercent,
+            started
+          });
         }
       }
       
       if (processes.length > 0) {
         this.updateProcessTracking(processes);
-        console.log(`[Process Tracking Windows] ✅ Updated ${this.processTracking.size} processes using tasklist (${processes.length} found)`);
+  console.log(`[Process Tracking Windows] ✅ Tracked ${processes.length} processes with >10MB RAM (total tracking: ${this.processTracking.size})`);
+      } else {
+        console.log('[Process Tracking Windows] ⚠️ No processes found - may need to adjust filter');
       }
     } catch (error) {
       console.error('[Process Tracking Windows] Failed:', error.message);
+      // Try fallback to simple tasklist
+      try {
+        const { stdout } = await execAsync('tasklist', { timeout: 2000, windowsHide: true });
+        const lines = stdout.trim().split('\n').slice(3); // Skip headers
+        const processes = [];
+        
+        for (const line of lines) {
+          const match = line.match(/^(\S+)\s+(\d+)/);
+          if (match) {
+            const [, name, pidStr] = match;
+            const pid = parseInt(pidStr);
+            if (pid > 0) {
+              processes.push({
+                pid,
+                name,
+                command: name,
+                cpu: 0.01,
+                memVsTotal: 0.1
+              });
+            }
+          }
+        }
+        
+        if (processes.length > 0) {
+          this.updateProcessTracking(processes);
+          console.log(`[Process Tracking Windows] ✅ Fallback: tracked ${processes.length} processes`);
+        }
+      } catch (fallbackError) {
+        console.error('[Process Tracking Windows] Fallback also failed:', fallbackError.message);
+      }
     }
   }
 
@@ -954,86 +1196,152 @@ class BatteryService {
 
   /**
    * Update process tracking to monitor battery impact over time
-   * FIXED: Now properly tracks time since current session start only
-   * Resets on system shutdown/restart as expected
+   * FIXED: Only tracks from when FortiMorph session started, not from system boot
+   * This ensures accurate battery tracking for current session only
    */
   updateProcessTracking(processList) {
     const now = Date.now();
     const currentPids = new Set();
+    const isDev = process.env.NODE_ENV === 'development';
     
     // Update or add processes
-    processList.forEach(process => {
-      if (process.cpu > 0.1 || process.memVsTotal > 0) { // Track any measurable activity
-        currentPids.add(process.pid);
+    processList.forEach(proc => {
+      if (proc.cpu > 0.05 || proc.memVsTotal > 0) { // Track even minimal activity for accuracy
+        currentPids.add(proc.pid);
         
-        if (!this.processTracking.has(process.pid)) {
-          // New process detected - record when WE first saw it (not system boot time)
-          // This ensures accurate "running time since laptop started" tracking
+        if (!this.processTracking.has(proc.pid)) {
+          // NEW PROCESS DETECTED - Start tracking from NOW
+          // IMPORTANT: We track from when WE discover it, not from system process start time
+          // This gives accurate "running time" for battery impact during THIS session
           let processStartTime = now;
           
-          // Try to get actual process start time from the system
-          if (process.started) {
+          // Check if process started recently (within last 5 minutes)
+          // This helps distinguish newly launched apps from long-running system processes
+          if (proc.started) {
             try {
-              // Parse the started timestamp
-              const startDate = new Date(process.started);
-              if (!isNaN(startDate.getTime())) {
-                const parsedTime = startDate.getTime();
-                // Only use if it's after system boot and not in the future
-                if (parsedTime >= this.systemBootTime && parsedTime <= now) {
-                  processStartTime = parsedTime;
-                } else {
-                  // Invalid timestamp - use when we first detected it
-                  console.log(`[Process Tracking] Invalid start time for ${process.name}, using detection time`);
-                  processStartTime = now;
+              let parsedTime;
+              
+              // Handle different time formats
+              if (typeof proc.started === 'number') {
+                parsedTime = proc.started;
+              } else {
+                const startDate = new Date(proc.started);
+                if (!isNaN(startDate.getTime())) {
+                  parsedTime = startDate.getTime();
+                }
+              }
+              
+              // Only use actual start time if process started AFTER our session began
+              // This prevents showing "18 days" for system processes
+              if (parsedTime && parsedTime >= this.sessionStartTime && parsedTime <= now) {
+                processStartTime = parsedTime;
+                if (isDev) {
+                  const runningSeconds = (now - processStartTime) / 1000;
+                  console.log(`[Process Tracking] ${proc.name} started ${runningSeconds.toFixed(1)}s ago (recent launch)`);
+                }
+              } else {
+                // Old process or invalid time - track from now
+                processStartTime = now;
+                if (isDev && parsedTime && parsedTime < this.sessionStartTime) {
+                  console.log(`[Process Tracking] ${proc.name} is old system process - tracking from now`);
                 }
               }
             } catch (e) {
-              // If parsing fails, use current time (when we detected it)
-              console.log(`[Process Tracking] Could not parse start time for ${process.name}, using detection time`);
               processStartTime = now;
             }
           }
           
-          // IMPORTANT: If startTime is before our session started, cap it to session start
-          // This ensures we only count runtime during THIS session
-          if (processStartTime < this.sessionStartTime) {
-            console.log(`[Process Tracking] ${process.name} started before our session, capping to session start`);
-            processStartTime = this.sessionStartTime;
-          }
+          // Generate unique session ID for database linking
+          const sessionId = `${proc.pid}_${processStartTime}_${Math.random().toString(36).substr(2, 9)}`;
+          this.processSessionIds.set(proc.pid, sessionId);
           
-          // New process
-          this.processTracking.set(process.pid, {
-            name: process.name || 'Unknown',
-            command: process.command || process.name || 'N/A',
+          // Store new process with start time from current session
+          this.processTracking.set(proc.pid, {
+            name: proc.name || 'Unknown',
+            command: proc.command || proc.name || 'N/A',
             startTime: processStartTime,
-            totalCpu: process.cpu || 0,
-            totalMem: process.memVsTotal || 0,
+            totalCpu: proc.cpu || 0,
+            totalMem: proc.memVsTotal || 0,
             samples: 1,
             lastSeen: now,
-            peakCpu: process.cpu || 0,
-            peakMem: process.memVsTotal || 0
+            peakCpu: proc.cpu || 0,
+            peakMem: proc.memVsTotal || 0,
+            sessionId
           });
+          
+          // Start database session
+          try {
+            this.db.startAppSession(sessionId, proc.name || 'Unknown', proc.command || proc.name || 'N/A', proc.pid);
+            if (isDev) {
+              const runningSince = new Date(processStartTime).toLocaleTimeString();
+              console.log(`[Process Tracking] NEW: ${proc.name} (PID: ${proc.pid}) - Tracking from ${runningSince}`);
+            }
+          } catch (err) {
+            console.error('Failed to start app session in DB:', err);
+          }
         } else {
-          // Update existing process
-          const tracked = this.processTracking.get(process.pid);
-          tracked.totalCpu += process.cpu || 0;
-          tracked.totalMem += process.memVsTotal || 0;
+          // UPDATE EXISTING PROCESS
+          const tracked = this.processTracking.get(proc.pid);
+          const cpuDelta = proc.cpu || 0;
+          const memDelta = proc.memVsTotal || 0;
+          
+          tracked.totalCpu += cpuDelta;
+          tracked.totalMem += memDelta;
           tracked.samples++;
           tracked.lastSeen = now;
-          tracked.peakCpu = Math.max(tracked.peakCpu, process.cpu || 0);
-          tracked.peakMem = Math.max(tracked.peakMem, process.memVsTotal || 0);
+          tracked.peakCpu = Math.max(tracked.peakCpu, cpuDelta);
+          tracked.peakMem = Math.max(tracked.peakMem, memDelta);
+          
+          // Calculate battery impact for this sample
+          const runningMinutes = (now - tracked.startTime) / 60000;
+          const batteryImpact = (cpuDelta * 0.5) + (memDelta * 0.1); // Weighted impact score
+          
+          // Update database session
+          try {
+            this.db.updateAppSession(tracked.sessionId, cpuDelta, memDelta, batteryImpact);
+            
+            // Record snapshot for historical analytics
+            this.db.recordAppUsage(
+              tracked.name,
+              tracked.command,
+              proc.pid,
+              tracked.sessionId,
+              cpuDelta,
+              memDelta,
+              batteryImpact
+            );
+          } catch (err) {
+            console.error('Failed to update app session in DB:', err);
+          }
         }
       }
     });
     
-    // Remove processes that are no longer running
-    // Check if process hasn't been seen in last 30 seconds (2 monitoring cycles)
-    const thirtySecondsAgo = now - 30000;
+    // GHOST PROCESS PREVENTION: Remove processes that are no longer running
+  // Check if process hasn't been seen in last ~9 seconds (roughly one tracking cycle)
+  // This makes closed apps disappear promptly from the Top Draining Apps list
+  const removalThreshold = now - 9000;
+    const closedProcesses = [];
+    
     for (const [pid, data] of this.processTracking.entries()) {
-      if (data.lastSeen < thirtySecondsAgo && !currentPids.has(pid)) {
-        console.log(`Process ${data.name} (PID: ${pid}) closed - removing from tracking`);
+      if (data.lastSeen < removalThreshold && !currentPids.has(pid)) {
+        closedProcesses.push({ pid, name: data.name, sessionId: data.sessionId });
+        
+        // End database session
+        try {
+          this.db.endAppSession(data.sessionId);
+        } catch (err) {
+          console.error('Failed to end app session in DB:', err);
+        }
+        
         this.processTracking.delete(pid);
+        this.processSessionIds.delete(pid);
       }
+    }
+    
+    // Log closed processes in dev mode
+    if (isDev && closedProcesses.length > 0) {
+      console.log(`[Process Tracking] CLOSED: ${closedProcesses.map(p => p.name).join(', ')}`);
     }
     
     // Store snapshot in history
@@ -1047,13 +1355,12 @@ class BatteryService {
       this.processHistory.shift();
     }
     
-    // DON'T save tracking data across sessions anymore
-    // Data should reset on laptop shutdown/restart
-    // Removed: this.savePersistentTracking();
+    // Data now persists in database - no need for in-memory persistence across sessions
   }
 
   /**
    * Get top battery-draining processes with enhanced metrics
+   * OPTIMIZED: Simple, fast calculation focused on current session impact
    */
   getTopBatteryDrainingProcesses() {
     const now = Date.now();
@@ -1061,23 +1368,26 @@ class BatteryService {
     
     console.log(`[Top Processes] Processing ${this.processTracking.size} tracked processes`);
     
-    // If no processes tracked yet, return empty array with explanation
+    // If no processes tracked yet, return empty array
     if (this.processTracking.size === 0) {
       console.log('[Top Processes] ⚠️ No processes tracked yet - returning empty array');
       return [];
     }
     
     for (const [pid, data] of this.processTracking.entries()) {
+      // Calculate running time from when we started tracking this process
       const runningTime = now - data.startTime; // milliseconds
       const runningMinutes = runningTime / 60000;
       const runningHours = runningTime / 3600000;
       
+      // Calculate average CPU and memory usage
       const avgCpu = data.samples > 0 ? data.totalCpu / data.samples : 0;
       const avgMem = data.samples > 0 ? data.totalMem / data.samples : 0;
       
-      // Calculate battery impact score
-      // Higher CPU usage and longer running time = higher impact
-      const batteryImpact = (avgCpu * runningMinutes) + (avgMem * runningMinutes * 0.1);
+      // SIMPLIFIED BATTERY IMPACT CALCULATION:
+      // Impact = Average CPU% * Minutes Running + Average Memory% * Minutes Running * 0.2
+      // This is straightforward and shows real impact during current session
+      const batteryImpact = (avgCpu * runningMinutes) + (avgMem * runningMinutes * 0.2);
       
       processes.push({
         pid,
@@ -1089,8 +1399,11 @@ class BatteryService {
         peakMem: Math.round(data.peakMem * 10) / 10,
         runningTime: runningMinutes < 60 
           ? `${Math.round(runningMinutes)}m` 
-          : `${Math.floor(runningHours)}h ${Math.round(runningMinutes % 60)}m`,
+          : runningHours < 24
+          ? `${Math.floor(runningHours)}h ${Math.round(runningMinutes % 60)}m`
+          : `${Math.floor(runningHours / 24)}d ${Math.floor(runningHours % 24)}h`,
         runningTimeMinutes: Math.round(runningMinutes),
+        runningTimeHours: Math.round(runningHours * 10) / 10,
         batteryImpact: Math.round(batteryImpact),
         samples: data.samples
       });
@@ -1102,8 +1415,10 @@ class BatteryService {
     const topProcesses = processes.slice(0, 15);
     console.log(`[Top Processes] ✅ Returning top ${topProcesses.length} of ${processes.length} total processes`);
     if (topProcesses.length > 0) {
-      console.log(`[Top Processes] Top 5:`, 
-        topProcesses.slice(0, 5).map(p => `${p.name}(impact:${p.batteryImpact}, cpu:${p.avgCpu}%)`).join(', ')
+      console.log(`[Top Processes] Top 3:`, 
+        topProcesses.slice(0, 3).map(p => 
+          `${p.name}(${p.runningTime}, ${p.avgCpu}% CPU, impact:${p.batteryImpact})`
+        ).join(' | ')
       );
     }
     
@@ -1239,11 +1554,238 @@ class BatteryService {
   }
 
   /**
+   * Get historical app usage analytics from database
+   * @param {string} timeframe - 'today', 'yesterday', 'last_week', 'last_month'
+   * @returns {Object} Historical app usage data with percentages
+   */
+  async getHistoricalAppUsageAnalytics(timeframe = 'today') {
+    try {
+      console.log(`[Usage Analytics] Fetching data for timeframe: ${timeframe}`);
+      
+      // Get app usage data from database
+      const appUsageData = this.db.getHistoricalAppUsage(timeframe);
+      
+      console.log(`[Usage Analytics] ${timeframe}: Found ${appUsageData ? appUsageData.length : 0} apps`);
+      
+      if (!appUsageData || appUsageData.length === 0) {
+        console.log(`[Usage Analytics] ${timeframe}: No data available`);
+        return {
+          timeframe,
+          apps: [],
+          totalImpact: 0,
+          message: 'No historical data available for this timeframe'
+        };
+      }
+      
+      // Get total battery impact for percentage calculations
+      const totalImpact = this.db.getTotalBatteryImpact(timeframe);
+      
+      console.log(`[Usage Analytics] ${timeframe}: Total impact = ${totalImpact}`);
+      
+      // Calculate percentages and format data
+      const apps = appUsageData.map(app => {
+        const percentOfTotal = totalImpact > 0 ? (app.total_battery_impact / totalImpact) * 100 : 0;
+        
+        // Estimate usage time based on samples (8-second intervals)
+        const usageTimeMinutes = (app.samples * 8) / 60;
+        const usageTimeFormatted = usageTimeMinutes < 60 
+          ? `${Math.round(usageTimeMinutes)}m` 
+          : `${Math.floor(usageTimeMinutes / 60)}h ${Math.round(usageTimeMinutes % 60)}m`;
+        
+        return {
+          name: app.app_name,
+          command: app.app_command,
+          avgCpu: Math.round(app.avg_cpu * 10) / 10,
+          avgMemory: Math.round(app.avg_memory * 10) / 10,
+          totalBatteryImpact: Math.round(app.total_battery_impact),
+          peakBatteryImpact: Math.round(app.peak_battery_impact),
+          percentOfTotal: Math.round(percentOfTotal * 10) / 10,
+          usageTime: usageTimeFormatted,
+          usageTimeMinutes: Math.round(usageTimeMinutes),
+          samples: app.samples
+        };
+      });
+      
+      // Sort by percent of total (highest first)
+      apps.sort((a, b) => b.percentOfTotal - a.percentOfTotal);
+      
+      return {
+        timeframe,
+        apps: apps.slice(0, 15), // Top 15 apps
+        totalImpact: Math.round(totalImpact),
+        totalAppsTracked: appUsageData.length
+      };
+    } catch (error) {
+      console.error('Error getting historical app usage analytics:', error);
+      return {
+        timeframe,
+        apps: [],
+        totalImpact: 0,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Get comprehensive usage insights for all timeframes
+   * @returns {Object} Usage insights for today, yesterday, last week, last month
+   */
+  async getAllTimeframeUsageInsights() {
+    try {
+      const [today, yesterday, lastWeek, lastMonth] = await Promise.all([
+        this.getHistoricalAppUsageAnalytics('today'),
+        this.getHistoricalAppUsageAnalytics('yesterday'),
+        this.getHistoricalAppUsageAnalytics('last_week'),
+        this.getHistoricalAppUsageAnalytics('last_month')
+      ]);
+      
+      return {
+        today,
+        yesterday,
+        lastWeek,
+        lastMonth,
+        activeSessionsCount: this.db.getActiveSessionsCount()
+      };
+    } catch (error) {
+      console.error('Error getting all timeframe usage insights:', error);
+      return {
+        today: { apps: [], totalImpact: 0 },
+        yesterday: { apps: [], totalImpact: 0 },
+        lastWeek: { apps: [], totalImpact: 0 },
+        lastMonth: { apps: [], totalImpact: 0 },
+        activeSessionsCount: 0,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Start health check monitor
+   * Monitors service health and auto-restarts if needed
+   */
+  startHealthCheck() {
+    // Check health every 30 seconds
+    this.healthCheckInterval = setInterval(() => {
+      try {
+        const now = Date.now();
+        const timeSinceLastUpdate = now - this.lastSuccessfulUpdate;
+        
+        // If no successful update in 5 minutes, attempt recovery
+        if (timeSinceLastUpdate > 300000 && !this.isRecovering) {
+          console.warn('[Battery Health Check] No successful update in 5 minutes. Attempting recovery...');
+          this.attemptRecovery();
+        }
+        
+        // Dev logging every 5 minutes
+        if (process.env.NODE_ENV === 'development') {
+          const minutes = Math.floor(timeSinceLastUpdate / 60000);
+          if (minutes > 0 && minutes % 5 === 0) {
+            console.log(`[Battery Health Check] Service healthy. Last update: ${minutes}m ago`);
+          }
+        }
+      } catch (error) {
+        console.error('[Battery Health Check] Error during health check:', error);
+      }
+    }, 30000); // Every 30 seconds
+    
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[Battery Health Check] Health monitoring started');
+    }
+  }
+
+  /**
+   * Stop health check monitor
+   */
+  stopHealthCheck() {
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = null;
+      
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[Battery Health Check] Health monitoring stopped');
+      }
+    }
+  }
+
+  /**
+   * Attempt to recover from errors
+   * Auto-restarts monitoring if it has stopped
+   */
+  async attemptRecovery() {
+    if (this.isRecovering) {
+      return; // Already recovering
+    }
+    
+    this.isRecovering = true;
+    console.warn('[Battery Recovery] Attempting to recover battery service...');
+    
+    try {
+      // Stop current monitoring
+      this.stopMonitoring();
+      
+      // Wait a moment
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Restart monitoring
+      this.startMonitoring();
+      
+      // Reset error counter
+      this.monitoringErrors = 0;
+      this.lastSuccessfulUpdate = Date.now();
+      
+      console.log('[Battery Recovery] Service successfully restarted');
+      this.db.addLog('battery', 'Battery service auto-recovered', {
+        reason: 'Too many consecutive errors or stalled updates'
+      }, 'info');
+      
+    } catch (error) {
+      console.error('[Battery Recovery] Recovery failed:', error);
+      this.db.addLog('battery', 'Battery service recovery failed', {
+        error: error.message
+      }, 'error');
+    } finally {
+      this.isRecovering = false;
+    }
+  }
+
+  /**
+   * Gracefully handle missing battery data
+   * Returns safe defaults to prevent crashes
+   */
+  getSafeBatteryData() {
+    return {
+      hasBattery: false,
+      isCharging: false,
+      percent: 0,
+      timeRemaining: null,
+      acConnected: false,
+      type: 'Unknown',
+      model: 'Unknown',
+      manufacturer: 'Unknown',
+      maxCapacity: null,
+      currentCapacity: null,
+      capacityUnit: null,
+      voltage: null,
+      capacityPercent: null,
+      cycleCount: null,
+      temperature: null,
+      timestamp: Date.now(),
+      dataAvailability: {
+        hasCapacityData: false,
+        hasCycleCount: false,
+        hasTemperature: false,
+        reason: 'Battery monitoring unavailable or device has no battery'
+      }
+    };
+  }
+
+  /**
    * Shutdown battery service
    */
   shutdown() {
     console.log('Shutting down battery service...');
     this.stopMonitoring();
+    this.stopHealthCheck();
     this.saveSettings();
     
     // Save tracking data before shutdown

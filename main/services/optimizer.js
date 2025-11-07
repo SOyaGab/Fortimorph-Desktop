@@ -280,11 +280,63 @@ class OptimizerService {
           resolve({
             success: true,
             pid,
-            message: `Process ${pid} terminated successfully`
+            message: `Process ${pid} and its children terminated successfully`
           });
         }
       });
     });
+  }
+
+  /**
+   * End all processes by name (e.g., kill all Chrome processes)
+   * @param {string} processName - Name of the process to terminate
+   * @returns {Promise<Object>} Result of process termination
+   */
+  async endProcessByName(processName) {
+    try {
+      // On Windows, use taskkill to terminate all processes with that name
+      if (process.platform === 'win32') {
+        const { stdout, stderr } = await execAsync(`taskkill /F /IM "${processName}" /T`, {
+          timeout: 5000,
+          windowsHide: true
+        });
+        
+        return {
+          success: true,
+          processName,
+          message: `All processes matching "${processName}" terminated successfully`,
+          output: stdout
+        };
+      } else {
+        // On Unix-like systems, use pkill
+        const { stdout, stderr } = await execAsync(`pkill -9 "${processName}"`, {
+          timeout: 5000
+        });
+        
+        return {
+          success: true,
+          processName,
+          message: `All processes matching "${processName}" terminated successfully`,
+          output: stdout
+        };
+      }
+    } catch (error) {
+      // taskkill returns error code if no process found, but that's okay
+      if (error.message.includes('not found') || error.message.includes('No tasks')) {
+        return {
+          success: true,
+          processName,
+          message: `No processes found matching "${processName}"`,
+          alreadyTerminated: true
+        };
+      }
+      
+      return {
+        success: false,
+        processName,
+        message: `Failed to terminate "${processName}": ${error.message}`
+      };
+    }
   }
 
   /**

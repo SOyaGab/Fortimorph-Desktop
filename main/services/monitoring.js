@@ -5,7 +5,7 @@
  */
 
 const si = require('systeminformation');
-// const pidusage = require('pidusage'); // Not currently used
+const pidusage = require('pidusage');
 const os = require('os');
 const { exec } = require('child_process');
 const { promisify } = require('util');
@@ -23,6 +23,10 @@ class MonitoringService {
       timestamps: []
     };
     this.maxHistorySize = 60; // Keep 60 data points (1 minute at 1s intervals)
+    this.lastProcessFetch = 0; // Timestamp of last fetch
+    this.minFetchInterval = 1000; // 1 second minimum (ALL processes need more time)
+    this.isProcessFetching = false; // Prevent concurrent fetches
+    this.cachedProcessList = []; // Cache last successful fetch
   }
 
   /**
@@ -122,21 +126,60 @@ class MonitoringService {
 
   /**
    * Get detailed process list with CPU and memory usage
-   * @returns {Promise<Array>} List of processes with metrics
+   * ROBUST: Shows ALL processes with REAL metrics using pidusage
+   * @returns {Promise<Array>} Complete list of all running processes
    */
   async getProcessList() {
+    // Throttle: Prevent fetching too frequently
+    const now = Date.now();
+    const timeSinceLastFetch = now - this.lastProcessFetch;
+    
+    // If already fetching, return cached data
+    if (this.isProcessFetching) {
+      console.log('[Process List] Already fetching, returning cached data');
+      return this.cachedProcessList;
+    }
+    
+    // If too soon since last fetch, return cached data
+    if (timeSinceLastFetch < this.minFetchInterval) {
+      console.log(`[Process List] Throttled (${timeSinceLastFetch}ms < ${this.minFetchInterval}ms), returning cached data`);
+      return this.cachedProcessList;
+    }
+    
+    this.isProcessFetching = true;
+    this.lastProcessFetch = now;
+    
     try {
+      console.log('[Process List] Fetching fresh process data...');
+      
+      // Get ALL processes from systeminformation
       const processes = await si.processes();
       
-      // Filter and process in one pass for better performance
-      const detailedProcesses = processes.list
-        .filter(p => {
-          // Filter criteria:
-          // 1. Valid PID
-          // 2. Has a name
-          // 3. Using memory (active process)
-          return p.pid > 0 && p.name && p.mem > 0;
-        })
+      console.log(`[Process List] Retrieved ${processes.list?.length || 0} total processes`);
+      
+      if (!processes.list || processes.list.length === 0) {
+        console.warn('[Process List] No processes returned, keeping cached data');
+        return this.cachedProcessList;
+      }
+
+      // Get ALL valid PIDs (filter only invalid ones)
+      const validProcesses = processes.list.filter(p => p.pid > 0 && p.name);
+      const allPids = validProcesses.map(p => p.pid);
+      
+      console.log(`[Process List] Using pidusage for ALL ${allPids.length} processes...`);
+      
+      // Get REAL CPU and memory stats for ALL processes using pidusage
+      let pidStats = {};
+      try {
+        // This may take a moment but gives ACCURATE data for ALL processes
+        pidStats = await pidusage(allPids);
+        console.log(`[Process List] ✅ pidusage returned stats for ${Object.keys(pidStats).length} processes`);
+      } catch (pidError) {
+        console.warn('[Process List] pidusage error, using systeminformation fallback:', pidError.message);
+      }
+
+      // Map ALL processes with accurate metrics
+      const allProcesses = validProcesses
         .map((proc) => {
           // Extract just the executable name without path
           let displayName = proc.name;
@@ -147,33 +190,68 @@ class MonitoringService {
             displayName = displayName.split('/').pop();
           }
           
+          // Get accurate stats from pidusage
+          const pidStat = pidStats[proc.pid];
+          
+          // CPU: Use pidusage first (REAL data), fallback to systeminformation
+          let cpuValue = 0;
+          if (pidStat && typeof pidStat.cpu === 'number') {
+            cpuValue = pidStat.cpu; // REAL CPU from pidusage
+          } else if (typeof proc.cpu === 'number') {
+            cpuValue = proc.cpu;
+          } else if (typeof proc.pcpu === 'number') {
+            cpuValue = proc.pcpu;
+          }
+          
+          // Memory: Use pidusage first (REAL data), fallback to systeminformation
+          let memValue = 0;
+          let memPercentValue = 0;
+          
+          if (pidStat && typeof pidStat.memory === 'number') {
+            memValue = pidStat.memory; // REAL memory in bytes from pidusage
+            memPercentValue = (memValue / os.totalmem()) * 100;
+          } else if (typeof proc.mem === 'number') {
+            memValue = proc.mem;
+            memPercentValue = typeof proc.memVsTotal === 'number' ? proc.memVsTotal : 0;
+          }
+          
           return {
             pid: proc.pid,
             name: displayName,
-            cpu: typeof proc.cpu === 'number' ? proc.cpu.toFixed(2) : '0.00',
-            memory: proc.mem,
-            memoryPercent: proc.memVsTotal ? proc.memVsTotal.toFixed(2) : '0.00',
+            cpu: cpuValue.toFixed(2),
+            cpuPercent: cpuValue,
+            memory: memValue,
+            memoryFormatted: (memValue / 1024 / 1024).toFixed(1) + ' MB',
+            memoryPercent: memPercentValue.toFixed(2),
+            memoryPercentNum: memPercentValue,
             priority: proc.priority || 'Normal',
             state: proc.state || 'running',
             started: proc.started || '',
-            command: proc.command || displayName
+            command: proc.command || displayName,
+            user: proc.user || '',
+            timestamp: Date.now()
           };
         })
+        // Sort by CPU usage (highest first), then by memory
         .sort((a, b) => {
-          // Sort by memory usage first, then CPU
-          const memDiff = b.memory - a.memory;
-          if (Math.abs(memDiff) > 50) { // Significant memory difference
-            return memDiff;
-          }
-          return parseFloat(b.cpu) - parseFloat(a.cpu);
-        })
-        .slice(0, 500); // Top 500 processes (increased from 100 for better visibility)
+          const cpuDiff = b.cpuPercent - a.cpuPercent;
+          if (Math.abs(cpuDiff) > 0.01) return cpuDiff;
+          return b.memoryPercentNum - a.memoryPercentNum;
+        });
 
-      console.log(`Process list retrieved: ${detailedProcesses.length} processes`);
-      return detailedProcesses;
+      // Cache the complete result - NO FILTERING, show ALL processes
+      this.cachedProcessList = allProcesses;
+      
+      console.log(`[Process List] ✅ Cached ALL ${allProcesses.length} processes`);
+      console.log(`[Process List] Top 5 by CPU: ${allProcesses.slice(0, 5).map(p => `${p.name}(${p.cpu}%)`).join(', ')}`);
+      
+      return allProcesses;
     } catch (error) {
-      console.error('Error getting process list:', error);
-      throw error;
+      console.error('[Process List] Error:', error.message);
+      // Return cached data on error
+      return this.cachedProcessList;
+    } finally {
+      this.isProcessFetching = false;
     }
   }
 

@@ -32,6 +32,66 @@ class LogsService {
   }
 
   /**
+   * Log info message (wrapper for db.addLog)
+   * @param {string} message - Log message
+   * @param {string} type - Log type/category
+   * @param {object} metadata - Additional metadata
+   */
+  async info(message, type = 'system', metadata = null) {
+    try {
+      const metadataStr = metadata ? JSON.stringify(metadata) : null;
+      this.db.addLog(type, message, metadataStr, 'info');
+    } catch (error) {
+      console.error('Failed to log info:', error);
+    }
+  }
+
+  /**
+   * Log error message (wrapper for db.addLog)
+   * @param {string} message - Log message
+   * @param {string} type - Log type/category
+   * @param {object} metadata - Additional metadata
+   */
+  async error(message, type = 'system', metadata = null) {
+    try {
+      const metadataStr = metadata ? JSON.stringify(metadata) : null;
+      this.db.addLog(type, message, metadataStr, 'error');
+    } catch (error) {
+      console.error('Failed to log error:', error);
+    }
+  }
+
+  /**
+   * Log warning message (wrapper for db.addLog)
+   * @param {string} message - Log message
+   * @param {string} type - Log type/category
+   * @param {object} metadata - Additional metadata
+   */
+  async warn(message, type = 'system', metadata = null) {
+    try {
+      const metadataStr = metadata ? JSON.stringify(metadata) : null;
+      this.db.addLog(type, message, metadataStr, 'warn');
+    } catch (error) {
+      console.error('Failed to log warning:', error);
+    }
+  }
+
+  /**
+   * Log debug message (wrapper for db.addLog)
+   * @param {string} message - Log message
+   * @param {string} type - Log type/category
+   * @param {object} metadata - Additional metadata
+   */
+  async debug(message, type = 'system', metadata = null) {
+    try {
+      const metadataStr = metadata ? JSON.stringify(metadata) : null;
+      this.db.addLog(type, message, metadataStr, 'debug');
+    } catch (error) {
+      console.error('Failed to log debug:', error);
+    }
+  }
+
+  /**
    * Export logs to CSV format
    * @param {Object} filters - Log filters
    * @param {String} filename - Output filename

@@ -1,5 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar } from 'recharts';
+import { 
+  Battery, BatteryCharging, Zap, TrendingUp, TrendingDown, 
+  AlertTriangle, AlertCircle, Info, Clock, Cpu, MemoryStick,
+  Calendar, CalendarDays, BarChart3, Activity, Trash2, RefreshCw,
+  Settings, X, Check, ChevronDown, ChevronUp
+} from 'lucide-react';
 
 /**
  * Battery Center Component
@@ -37,9 +43,16 @@ const BatteryCenter = () => {
   const [showSystemHealth, setShowSystemHealth] = useState(false);
   const [coolingRecommendations, setCoolingRecommendations] = useState(null);
   
+  // Usage Insights state
+  const [usageInsights, setUsageInsights] = useState(null);
+  const [selectedTimeframe, setSelectedTimeframe] = useState('today');
+  const [loadingInsights, setLoadingInsights] = useState(false);
+  
   // Auto-refresh
   const [autoRefresh, setAutoRefresh] = useState(true);
   const refreshIntervalRef = useRef(null);
+  const healthIntervalRef = useRef(null);
+  const insightsIntervalRef = useRef(null);
 
   /**
    * Load battery data on mount and set up auto-refresh
@@ -47,18 +60,35 @@ const BatteryCenter = () => {
   useEffect(() => {
     loadBatteryData();
     loadCustomThresholds();
-    loadSystemHealth(); // Load system health data
+    loadSystemHealth();
+    loadUsageInsights();
     
     if (autoRefresh) {
+      // Battery data refreshes every 15 seconds
       refreshIntervalRef.current = setInterval(() => {
         loadBatteryData();
-        loadSystemHealth(); // Refresh system health
-      }, 10000); // Refresh every 10 seconds
+      }, 15000);
+      
+      // System health refreshes every 30 seconds
+      healthIntervalRef.current = setInterval(() => {
+        loadSystemHealth();
+      }, 30000);
+      
+      // Usage insights refresh every 60 seconds
+      insightsIntervalRef.current = setInterval(() => {
+        loadUsageInsights();
+      }, 60000);
     }
     
     return () => {
       if (refreshIntervalRef.current) {
         clearInterval(refreshIntervalRef.current);
+      }
+      if (healthIntervalRef.current) {
+        clearInterval(healthIntervalRef.current);
+      }
+      if (insightsIntervalRef.current) {
+        clearInterval(insightsIntervalRef.current);
       }
     };
   }, [autoRefresh]);
@@ -228,6 +258,28 @@ const BatteryCenter = () => {
   };
 
   /**
+   * Load usage insights data - OPTIMIZED for speed
+   */
+  const loadUsageInsights = useCallback(async () => {
+    try {
+      setLoadingInsights(true);
+      
+      // Load only the selected timeframe for faster performance
+      const result = await window.electron.invoke('battery:getAllTimeframeInsights');
+      
+      if (result.success) {
+        setUsageInsights(result.data);
+      } else {
+        console.error('[Usage Insights] Failed:', result.error);
+      }
+    } catch (err) {
+      console.error('[Usage Insights] Error:', err);
+    } finally {
+      setLoadingInsights(false);
+    }
+  }, []);
+
+  /**
    * Change optimization mode
    */
   const handleModeChange = async (newMode) => {
@@ -288,14 +340,12 @@ const BatteryCenter = () => {
   };
 
   /**
-   * Get battery icon based on percentage
+   * Get battery icon component based on percentage
    */
-  const getBatteryIcon = () => {
-    if (!batteryData) return '🔋';
-    if (batteryData.isCharging) return '⚡';
-    if (batteryData.percent <= 10) return '🪫';
-    if (batteryData.percent <= 50) return '🔋';
-    return '🔋';
+  const getBatteryIconComponent = () => {
+    if (!batteryData) return Battery;
+    if (batteryData.isCharging) return BatteryCharging;
+    return Battery;
   };
 
   /**
@@ -629,13 +679,33 @@ const BatteryCenter = () => {
   const getAlertStyle = (type) => {
     switch (type) {
       case 'critical':
-        return { icon: '🚨', color: 'text-red-500', bg: 'bg-red-500/10', border: 'border-red-500' };
+        return { 
+          Icon: AlertTriangle, 
+          color: 'text-red-500', 
+          bg: 'bg-red-500/10', 
+          border: 'border-red-500' 
+        };
       case 'warning':
-        return { icon: '⚠️', color: 'text-orange-500', bg: 'bg-orange-500/10', border: 'border-orange-500' };
+        return { 
+          Icon: AlertCircle, 
+          color: 'text-orange-500', 
+          bg: 'bg-orange-500/10', 
+          border: 'border-orange-500' 
+        };
       case 'info':
-        return { icon: 'ℹ️', color: 'text-blue-500', bg: 'bg-blue-500/10', border: 'border-blue-500' };
+        return { 
+          Icon: Info, 
+          color: 'text-blue-500', 
+          bg: 'bg-blue-500/10', 
+          border: 'border-blue-500' 
+        };
       default:
-        return { icon: '📌', color: 'text-gray-500', bg: 'bg-gray-500/10', border: 'border-gray-500' };
+        return { 
+          Icon: Info, 
+          color: 'text-gray-500', 
+          bg: 'bg-gray-500/10', 
+          border: 'border-gray-500' 
+        };
     }
   };
 
@@ -672,9 +742,9 @@ const BatteryCenter = () => {
   };
 
   /**
-   * Render 24-hour trend chart (using Recharts)
+   * Render 24-hour trend chart (using Recharts) - Memoized for performance
    */
-  const renderTrendChart = () => {
+  const renderTrendChart = useMemo(() => {
     if (!batteryTrend || batteryTrend.length === 0) {
       return (
         <div className="flex items-center justify-center h-64 text-gray-500">
@@ -683,12 +753,15 @@ const BatteryCenter = () => {
       );
     }
     
-    // Format data for chart
+    // Format data for chart - pre-calculate once
     const chartData = batteryTrend.slice(-48).map((point, index) => ({
       name: new Date(point.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
       battery: point.percent,
       charging: point.isCharging ? 1 : 0  // Show as binary indicator (0 or 1)
     }));
+    
+    // Calculate optimal tick interval to show more timestamps
+    const tickInterval = Math.max(0, Math.floor(chartData.length / 12));
     
     return (
       <div className="relative h-64">
@@ -709,7 +782,10 @@ const BatteryCenter = () => {
               dataKey="name" 
               stroke="#9CA3AF"
               tick={{ fontSize: 10 }}
-              interval="preserveStartEnd"
+              interval={tickInterval}
+              angle={-45}
+              textAnchor="end"
+              height={60}
             />
             <YAxis 
               yAxisId="left"
@@ -751,6 +827,7 @@ const BatteryCenter = () => {
               fill="url(#colorBattery)"
               name="Battery Level"
               strokeWidth={2}
+              isAnimationActive={false}
             />
             <Area 
               yAxisId="right"
@@ -761,19 +838,20 @@ const BatteryCenter = () => {
               fill="url(#colorCharging)"
               name="Charging"
               strokeWidth={2}
+              isAnimationActive={false}
             />
           </AreaChart>
         </ResponsiveContainer>
       </div>
     );
-  };
+  }, [batteryTrend]); // Only recalculate when batteryTrend changes
 
   // Loading state
   if (loading && !batteryData) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-[#001D3D] via-[#003566] to-[#000814]">
         <div className="text-center">
-          <div className="animate-spin text-6xl mb-4">🔋</div>
+          <Battery className="w-16 h-16 text-blue-400 animate-pulse mx-auto mb-4" />
           <p className="text-white text-xl">Loading Battery Data...</p>
         </div>
       </div>
@@ -782,10 +860,11 @@ const BatteryCenter = () => {
 
   // No battery detected
   if (!hasBattery) {
+    const BatteryIcon = getBatteryIconComponent();
     return (
       <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-[#001D3D] via-[#003566] to-[#000814]">
         <div className="text-center max-w-md">
-          <div className="text-6xl mb-4">🔌</div>
+          <BatteryIcon className="w-16 h-16 text-gray-400 mx-auto mb-4" />
           <h2 className="text-2xl font-bold text-white mb-2">No Battery Detected</h2>
           <p className="text-gray-400">
             This device does not have a battery or battery monitoring is not available.
@@ -862,8 +941,18 @@ const BatteryCenter = () => {
               {/* Charging Status */}
               <div className="flex justify-between items-center">
                 <span className="text-gray-400">Status</span>
-                <span className={`font-semibold ${batteryData?.isCharging ? 'text-green-400' : 'text-blue-400'}`}>
-                  {batteryData?.isCharging ? '⚡ Charging' : '🔋 On Battery'}
+                <span className={`font-semibold ${batteryData?.isCharging ? 'text-green-400' : 'text-blue-400'} flex items-center gap-1`}>
+                  {batteryData?.isCharging ? (
+                    <>
+                      <BatteryCharging className="w-4 h-4" />
+                      Charging
+                    </>
+                  ) : (
+                    <>
+                      <Battery className="w-4 h-4" />
+                      On Battery
+                    </>
+                  )}
                 </span>
               </div>
               
@@ -915,7 +1004,7 @@ const BatteryCenter = () => {
           {/* Trend Chart */}
           <div className="lg:col-span-2 bg-gray-800/40 backdrop-blur-lg rounded-2xl p-6 border border-gray-700">
             <h2 className="text-xl font-semibold text-white mb-4">24-Hour Trend</h2>
-            {renderTrendChart()}
+            {renderTrendChart}
             
             {/* Stats Summary */}
             {batteryStats && (
@@ -974,7 +1063,7 @@ const BatteryCenter = () => {
                   {isActive && (
                     <div className="absolute -top-3 left-1/2 transform -translate-x-1/2">
                       <div className="bg-blue-500 text-white text-xs px-3 py-1 rounded-full flex items-center gap-1 shadow-lg">
-                        <span>✓</span> Active
+                        <Check className="w-3 h-3" /> Active
                         <div className="absolute -bottom-1.5 left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-blue-500"></div>
                       </div>
                     </div>
@@ -983,8 +1072,9 @@ const BatteryCenter = () => {
                   <div className="text-4xl mb-3">{modeInfo.icon}</div>
                   <div className="text-white font-bold text-lg mb-1">{modeInfo.name}</div>
                   <div className="text-xs text-gray-300 mb-2">{modeInfo.description}</div>
-                  <div className="text-xs text-gray-400 mb-3">
-                    ⏱️ Updates every {modeInfo.polling}
+                  <div className="text-xs text-gray-400 mb-3 flex items-center justify-center gap-1">
+                    <Clock className="w-3 h-3" />
+                    Updates every {modeInfo.polling}
                   </div>
                   
                   {/* Show benefits on hover or when active */}
@@ -1662,92 +1752,65 @@ const BatteryCenter = () => {
                 </div>
               )}
 
-              {/* Battery Consumption by Apps */}
+              {/* Battery Consumption by Apps - Simple table like Processes */}
               {batteryData?.analytics?.topProcesses && batteryData.analytics.topProcesses.length > 0 ? (
                 <div className="bg-gray-700/30 rounded-lg p-4">
-                  <h3 className="text-lg font-semibold text-white mb-4">
+                  <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                    <Activity className="w-5 h-5 text-blue-400" />
                     Top Battery-Draining Apps
                   </h3>
                   <p className="text-sm text-gray-400 mb-4">
-                    These applications have been using the most power <strong>since your laptop started</strong>. 
-                    Running time shows how long each app has been active. When you close an app, it will be removed from this list. 
-                    <strong> All counters reset when you restart/shutdown your laptop.</strong>
+                    Apps tracked since FortiMorph started. Running time shows active duration.
                   </p>
+                  
+                  {/* Simple table like Processes tab */}
                   <div className="space-y-2">
-                    {batteryData.analytics.topProcesses.map((process, index) => (
+                    {batteryData.analytics.topProcesses.slice(0, 15).map((process, index) => (
                       <div 
-                        key={`${process.pid}-${process.name}-${index}`} 
-                        className="grid grid-cols-[auto_1fr_auto_auto] gap-3 items-center bg-gray-800/50 rounded-lg p-3 hover:bg-gray-800/70 transition-colors"
+                        key={`${process.pid}-${index}`} 
+                        className="flex items-center gap-3 bg-gray-800/50 rounded-lg p-3 hover:bg-gray-800/70 transition-colors"
                       >
-                        {/* Rank Number */}
-                        <div className="text-2xl font-bold text-blue-400 w-10 text-center">
-                          #{index + 1}
-                        </div>
+                        {/* Rank */}
+                        <div className="text-blue-400 font-bold w-6">#{index + 1}</div>
                         
-                        {/* Process Info */}
-                        <div className="min-w-0">
-                          <div className="text-white font-semibold truncate">{process.name}</div>
-                          <div className="text-xs text-gray-400 truncate">{process.command}</div>
-                          <div className="flex gap-2 mt-1 flex-wrap">
-                            <span className="text-xs bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded">
-                              ⏱️ Running: {process.runningTime}
-                            </span>
-                            <span className="text-xs bg-red-500/20 text-red-300 px-2 py-0.5 rounded">
-                              ⚡ Impact Score: {process.batteryImpact}
-                            </span>
+                        {/* Name */}
+                        <div className="flex-1 min-w-0">
+                          <div className="text-white font-semibold truncate text-sm">{process.name}</div>
+                          <div className="flex gap-2 text-xs text-gray-400 mt-0.5">
+                            <span>{process.avgCpu}% CPU</span>
+                            <span>•</span>
+                            <span>{process.avgMem}% RAM</span>
+                            <span>•</span>
+                            <span>{process.runningTime}</span>
                           </div>
                         </div>
                         
-                        {/* CPU Usage */}
-                        <div className="text-right min-w-[70px]">
-                          <div className="text-sm font-bold text-orange-400">{process.avgCpu}%</div>
-                          <div className="text-xs text-gray-500">avg CPU</div>
-                          <div className="text-xs text-orange-300">↑ {process.peakCpu}% peak</div>
-                        </div>
-                        
-                        {/* RAM Usage */}
-                        <div className="text-right min-w-[70px]">
-                          <div className="text-sm font-bold text-purple-400">{process.avgMem}%</div>
-                          <div className="text-xs text-gray-500">avg RAM</div>
-                          <div className="text-xs text-purple-300">↑ {process.peakMem}% peak</div>
+                        {/* Impact */}
+                        <div className="text-right">
+                          <div className="text-red-400 font-bold">{process.batteryImpact}</div>
+                          <div className="text-[10px] text-gray-500">impact</div>
                         </div>
                       </div>
                     ))}
                   </div>
-                  <div className="mt-4 space-y-2">
-                    <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3">
-                      <p className="text-sm text-gray-300">
-                        <strong>💡 Impact Score:</strong> Calculated from average CPU usage × running time. Higher scores mean more battery drain over time.
-                      </p>
-                    </div>
-                    <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-3">
-                      <p className="text-sm text-gray-300">
-                        <strong>🔋 How it works:</strong> We track apps from when your laptop boots up, not just when you open this app. 
-                        Apps automatically disappear when closed. Everything resets on laptop restart/shutdown.
-                      </p>
-                    </div>
-                    <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3">
-                      <p className="text-sm text-gray-300">
-                        <strong>⚡ Tip:</strong> Close apps you're not using to extend battery life. 
-                        Background apps still consume power even when minimized.
-                      </p>
-                    </div>
+                  
+                  <div className="mt-4 bg-blue-500/10 border border-blue-500/30 rounded-lg p-3">
+                    <p className="text-sm text-gray-300">
+                      <strong>Impact = CPU% × Minutes Running</strong>. Higher scores = more battery drain.
+                    </p>
                   </div>
                 </div>
               ) : (
                 <div className="bg-gray-700/30 rounded-lg p-4">
                   <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                    <span>⚙️</span> Top Battery-Draining Apps
+                    <Activity className="w-5 h-5 text-blue-400" />
+                    Top Battery-Draining Apps
                   </h3>
                   <div className="text-center py-6">
-                    <div className="text-4xl mb-2">💤</div>
+                    <RefreshCw className="w-12 h-12 text-gray-600 mx-auto mb-4 animate-spin" />
                     <p className="text-gray-400 font-semibold mb-2">Collecting battery usage data...</p>
-                    <p className="text-sm text-gray-500 mt-2 max-w-md mx-auto">
-                      The app is actively tracking all running processes. Data appears within 30-60 seconds as apps use CPU and memory.
-                    </p>
-                    <p className="text-xs text-gray-500 mt-3 max-w-md mx-auto">
-                      💡 <strong>How it works:</strong> We track apps from when your laptop boots up, not just when you open FortiMorph. 
-                      Apps automatically disappear when closed. Everything resets on laptop restart.
+                    <p className="text-sm text-gray-500 mt-2">
+                      Tracking starts now. Data appears within 30 seconds.
                     </p>
                     
                     {/* Debug info */}
@@ -1774,6 +1837,150 @@ const BatteryCenter = () => {
                   </div>
                 </div>
               )}
+
+              {/* Usage Insights - Historical App Battery Impact */}
+              <div className="bg-gradient-to-br from-gray-700/40 to-gray-800/40 rounded-xl p-6 border border-gray-600/30 shadow-lg">
+                <div className="flex items-center justify-between mb-6">
+                  <div>
+                    <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                      <BarChart3 className="w-6 h-6 text-blue-400" />
+                      Usage Insights
+                    </h3>
+                    <p className="text-sm text-gray-400 mt-1">
+                      App battery usage tracked since FortiMorph started
+                    </p>
+                  </div>
+                  <button
+                    onClick={loadUsageInsights}
+                    disabled={loadingInsights}
+                    className="px-4 py-2 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/40 text-blue-300 rounded-lg text-sm transition-all duration-150 ease-out disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${loadingInsights ? 'animate-spin' : ''}`} />
+                    {loadingInsights ? 'Loading...' : 'Refresh'}
+                  </button>
+                </div>
+
+                {/* Timeframe Selector */}
+                <div className="flex gap-2 mb-6 flex-wrap">
+                  {[
+                    { key: 'today', label: 'Today', icon: Calendar },
+                    { key: 'yesterday', label: 'Yesterday', icon: CalendarDays },
+                    { key: 'lastWeek', label: 'Last Week', icon: BarChart3 },
+                    { key: 'lastMonth', label: 'Last Month', icon: TrendingUp }
+                  ].map(({ key, label, icon: Icon }) => (
+                    <button
+                      key={key}
+                      onClick={() => setSelectedTimeframe(key)}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-150 ease-out flex items-center gap-2 ${
+                        selectedTimeframe === key
+                          ? 'bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-lg scale-105'
+                          : 'bg-gray-700/50 hover:bg-gray-700/70 text-gray-300 border border-gray-600/40'
+                      }`}
+                    >
+                      <Icon className="w-4 h-4" />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Usage Insights Content */}
+                {loadingInsights ? (
+                  <div className="text-center py-12">
+                    <RefreshCw className="w-12 h-12 text-blue-500 animate-spin mx-auto mb-4" />
+                    <p className="text-gray-400">Loading usage insights...</p>
+                  </div>
+                ) : usageInsights && usageInsights[selectedTimeframe]?.apps?.length > 0 ? (
+                  <div className="space-y-4">
+                    {/* Summary Stats */}
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
+                      <div className="bg-gradient-to-br from-blue-600/20 to-blue-700/20 border border-blue-500/30 rounded-lg p-3">
+                        <div className="text-xs text-blue-300 mb-1 flex items-center gap-1">
+                          <Activity className="w-3 h-3" />
+                          Apps Tracked
+                        </div>
+                        <div className="text-2xl font-bold text-blue-400">
+                          {usageInsights[selectedTimeframe].totalAppsTracked || 0}
+                        </div>
+                      </div>
+                      <div className="bg-gradient-to-br from-purple-600/20 to-purple-700/20 border border-purple-500/30 rounded-lg p-3">
+                        <div className="text-xs text-purple-300 mb-1 flex items-center gap-1">
+                          <Zap className="w-3 h-3" />
+                          Total Impact
+                        </div>
+                        <div className="text-2xl font-bold text-purple-400">
+                          {usageInsights[selectedTimeframe].totalImpact || 0}
+                        </div>
+                      </div>
+                      <div className="bg-gradient-to-br from-green-600/20 to-green-700/20 border border-green-500/30 rounded-lg p-3 col-span-2 md:col-span-1">
+                        <div className="text-xs text-green-300 mb-1 flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
+                          Active Sessions
+                        </div>
+                        <div className="text-2xl font-bold text-green-400">
+                          {usageInsights.activeSessionsCount || 0}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* App List - Simple and fast like Processes tab */}
+                    <div className="space-y-2">
+                      {usageInsights[selectedTimeframe].apps.slice(0, 15).map((app, index) => (
+                        <div
+                          key={`${app.name}-${index}`}
+                          className="bg-gray-800/60 border border-gray-700/50 rounded-lg p-3 hover:bg-gray-800/80 transition-colors"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            {/* App Info */}
+                            <div className="flex items-center gap-2 flex-1 min-w-0">
+                              <span className="text-sm font-bold text-blue-400 w-6">#{index + 1}</span>
+                              <div className="flex-1 min-w-0">
+                                <h4 className="text-white font-semibold truncate text-sm">{app.name}</h4>
+                                <div className="flex gap-2 mt-1 text-xs">
+                                  <span className="text-orange-300">{app.avgCpu}% CPU</span>
+                                  <span className="text-purple-300">{app.avgMemory}% RAM</span>
+                                  <span className="text-blue-300">{app.usageTime}</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Percentage */}
+                            <div className="text-right">
+                              <div className="text-xl font-bold text-white">{app.percentOfTotal}%</div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Info Footer */}
+                    <div className="mt-4 bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 flex items-start gap-2">
+                      <Info className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" />
+                      <p className="text-sm text-gray-300">
+                        <strong>About Usage Insights:</strong> Data is collected from when FortiMorph starts running. 
+                        For best results, set FortiMorph to start automatically on Windows startup. Percentages show each app's 
+                        share of total battery drain. Historical data is stored for 30 days.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-center py-12">
+                    <BarChart3 className="w-16 h-16 text-gray-600 mx-auto mb-4" />
+                    <p className="text-gray-400 font-semibold mb-2">No usage data available</p>
+                    <p className="text-sm text-gray-500 max-w-md mx-auto mb-4">
+                      {selectedTimeframe === 'today' 
+                        ? 'FortiMorph tracks apps while it\'s running. Keep the app open to collect battery usage data. Data appears within a few minutes of use.'
+                        : `No data recorded for ${selectedTimeframe.replace(/([A-Z])/g, ' $1').toLowerCase()}. Make sure FortiMorph was running during this period. Historical data is stored for up to 30 days.`
+                      }
+                    </p>
+                    {selectedTimeframe === 'today' && (
+                      <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 max-w-md mx-auto text-sm text-yellow-300">
+                        <strong>💡 Tip:</strong> Set FortiMorph to start automatically on Windows startup for complete battery tracking throughout the day.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
 
               {/* Discharge Rate Analysis */}
               {batteryData?.analytics?.dischargeAnalysis ? (
@@ -1854,169 +2061,6 @@ const BatteryCenter = () => {
                     <div className="mt-4">
                       <button
                         onClick={loadBatteryData}
-                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm transition-colors"
-                      >
-                        🔄 Refresh Data
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Usage History Comparison */}
-              {batteryData?.analytics?.usageHistory ? (
-                <div className="bg-gray-700/30 rounded-lg p-4">
-                  <h3 className="text-lg font-semibold text-white mb-4">
-                    Battery Usage History
-                  </h3>
-                  <p className="text-sm text-gray-400 mb-4">
-                    Compare your battery usage patterns over time.
-                  </p>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div className="bg-gradient-to-br from-blue-600/20 to-blue-800/20 border border-blue-500/30 rounded-lg p-4">
-                      <div className="text-center mb-3">
-                        <div className="text-lg font-bold text-blue-400">Today</div>
-                      </div>
-                      <div className="space-y-2">
-                        <div className="flex justify-between">
-                          <span className="text-gray-400 text-sm">Active Hours:</span>
-                          <span className="text-white font-semibold">
-                            {batteryData.analytics.usageHistory.today.activeHours.toFixed(1)}h
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-400 text-sm">Avg Battery:</span>
-                          <span className="text-white font-semibold">
-                            {batteryData.analytics.usageHistory.today.avgBatteryLevel}%
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-400 text-sm">Data Points:</span>
-                          <span className="text-gray-500 text-xs">
-                            {batteryData.analytics.usageHistory.today.dataPoints}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="bg-gradient-to-br from-green-600/20 to-green-800/20 border border-green-500/30 rounded-lg p-4">
-                      <div className="text-center mb-3">
-                        <div className="text-lg font-bold text-green-400">Yesterday</div>
-                      </div>
-                      <div className="space-y-2">
-                        <div className="flex justify-between">
-                          <span className="text-gray-400 text-sm">Active Hours:</span>
-                          <span className="text-white font-semibold">
-                            {batteryData.analytics.usageHistory.yesterday.activeHours.toFixed(1)}h
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-400 text-sm">Avg Battery:</span>
-                          <span className="text-white font-semibold">
-                            {batteryData.analytics.usageHistory.yesterday.avgBatteryLevel}%
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-400 text-sm">Data Points:</span>
-                          <span className="text-gray-500 text-xs">
-                            {batteryData.analytics.usageHistory.yesterday.dataPoints}
-                          </span>
-                        </div>
-                      </div>
-                      {batteryData.analytics.usageHistory.today.activeHours > 0 && batteryData.analytics.usageHistory.yesterday.activeHours > 0 && (
-                        <div className="mt-2 pt-2 border-t border-green-500/30">
-                          <div className="text-xs text-center">
-                            {batteryData.analytics.usageHistory.today.activeHours > batteryData.analytics.usageHistory.yesterday.activeHours ? (
-                              <span className="text-orange-400">
-                                ▲ {(batteryData.analytics.usageHistory.today.activeHours - batteryData.analytics.usageHistory.yesterday.activeHours).toFixed(1)}h more usage
-                              </span>
-                            ) : (
-                              <span className="text-green-400">
-                                ▼ {(batteryData.analytics.usageHistory.yesterday.activeHours - batteryData.analytics.usageHistory.today.activeHours).toFixed(1)}h less usage
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="bg-gradient-to-br from-purple-600/20 to-purple-800/20 border border-purple-500/30 rounded-lg p-4">
-                      <div className="text-center mb-3">
-                        <div className="text-lg font-bold text-purple-400">This Week</div>
-                      </div>
-                      <div className="space-y-2">
-                        <div className="flex justify-between">
-                          <span className="text-gray-400 text-sm">Total Hours:</span>
-                          <span className="text-white font-semibold">
-                            {batteryData.analytics.usageHistory.thisWeek.activeHours.toFixed(1)}h
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-400 text-sm">Daily Avg:</span>
-                          <span className="text-white font-semibold">
-                            {batteryData.analytics.usageHistory.thisWeek.dailyAverage.toFixed(1)}h
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-400 text-sm">Avg Battery:</span>
-                          <span className="text-white font-semibold">
-                            {batteryData.analytics.usageHistory.thisWeek.avgBatteryLevel}%
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-400 text-sm">Data Points:</span>
-                          <span className="text-gray-500 text-xs">
-                            {batteryData.analytics.usageHistory.thisWeek.dataPoints}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="mt-4 bg-purple-500/10 border border-purple-500/30 rounded-lg p-3">
-                    <p className="text-sm text-gray-300">
-                      <strong>📝 Note:</strong> Active hours are estimated based on periods when your laptop is running on battery. 
-                      Consistent usage patterns help extend overall battery lifespan. Data points show how many measurements were taken.
-                    </p>
-                  </div>
-                </div>
-              ) : (
-                <div className="bg-gray-700/30 rounded-lg p-4">
-                  <h3 className="text-lg font-semibold text-white mb-4">
-                    Battery Usage History
-                  </h3>
-                  <div className="text-center py-6">
-                    <div className="text-4xl mb-2">📊</div>
-                    <p className="text-gray-400 font-semibold mb-2">Collecting usage data...</p>
-                    <p className="text-sm text-gray-500 mt-2 max-w-md mx-auto">
-                      We need at least 2 battery measurements to show usage patterns. 
-                      Data is collected automatically every 10-60 seconds (depending on your optimization mode).
-                    </p>
-                    
-                    {/* Show current data collection status */}
-                    {batteryTrend && batteryTrend.length > 0 && (
-                      <div className="mt-4 bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 max-w-sm mx-auto">
-                        <p className="text-sm text-blue-300 mb-1">
-                          ⏳ Progress: {batteryTrend.length}/2 measurements collected
-                        </p>
-                        <div className="w-full bg-gray-700 rounded-full h-2 mt-2">
-                          <div
-                            className="bg-blue-500 h-2 rounded-full transition-all duration-500"
-                            style={{ width: `${Math.min((batteryTrend.length / 2) * 100, 100)}%` }}
-                          />
-                        </div>
-                        <p className="text-xs text-gray-400 mt-2">
-                          Keep the Battery Center tab open for faster data collection
-                        </p>
-                      </div>
-                    )}
-                    
-                    <div className="mt-4">
-                      <button
-                        onClick={() => {
-                          console.log('Battery trend:', batteryTrend);
-                          console.log('Battery analytics:', batteryData?.analytics);
-                          loadBatteryData();
-                        }}
                         className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm transition-colors"
                       >
                         🔄 Refresh Data
@@ -2278,11 +2322,15 @@ const BatteryCenter = () => {
         {alerts.length > 0 && (
           <div className="bg-gray-800/40 backdrop-blur-lg rounded-2xl p-6 border border-gray-700">
             <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-semibold text-white">Recent Alerts</h2>
+              <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+                <AlertCircle className="w-5 h-5 text-yellow-500" />
+                Recent Alerts
+              </h2>
               <button
                 onClick={handleClearAlerts}
-                className="text-sm text-gray-400 hover:text-white transition-colors"
+                className="text-sm text-gray-400 hover:text-white transition-colors flex items-center gap-1"
               >
+                <Trash2 className="w-4 h-4" />
                 Clear All
               </button>
             </div>
@@ -2290,6 +2338,7 @@ const BatteryCenter = () => {
             <div className="space-y-3">
               {alerts.map((alert, index) => {
                 const style = getAlertStyle(alert.type);
+                const AlertIcon = style.Icon;
                 return (
                   <div
                     key={index}
@@ -2298,21 +2347,22 @@ const BatteryCenter = () => {
                     <div className="flex items-start justify-between gap-4">
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-1">
-                          <span className="text-xl">{style.icon}</span>
+                          <AlertIcon className={`w-5 h-5 ${style.color}`} />
                           <span className={`font-semibold ${style.color}`}>{alert.message}</span>
                         </div>
                         {alert.action && (
                           <p className="text-sm text-gray-400 ml-7">{alert.action}</p>
                         )}
-                        <p className="text-xs text-gray-500 ml-7 mt-1">
+                        <p className="text-xs text-gray-500 ml-7 mt-1 flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
                           {new Date(alert.timestamp).toLocaleString()}
                         </p>
                       </div>
                       <button
                         onClick={() => handleDismissAlert(alert.id)}
-                        className="text-gray-500 hover:text-white transition-colors text-xl"
+                        className="text-gray-500 hover:text-white transition-colors"
                       >
-                        ✕
+                        <X className="w-5 h-5" />
                       </button>
                     </div>
                   </div>

@@ -1,7 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
-import LogsViewer from './LogsViewer';
-import BatteryCenter from './BatteryCenter';
+
+// Lazy load heavy components to improve performance
+const LogsViewer = lazy(() => import('./LogsViewer'));
+const BatteryCenter = lazy(() => import('./BatteryCenter'));
+const FilesManager = lazy(() => import('./FilesManager/FilesManager'));
+const BackupManager = lazy(() => import('./BackupManager'));
 
 const Dashboard = () => {
   const [metrics, setMetrics] = useState(null);
@@ -9,10 +13,12 @@ const Dashboard = () => {
   const [suggestions, setSuggestions] = useState([]);
   const [loading, setLoading] = useState(false); // Changed to false for instant UI
   const [error, setError] = useState(null);
-  const [selectedView, setSelectedView] = useState('overview'); // overview, cpu, memory, processes, storage, logs, battery
-  const refreshInterval = 10000; // 10 seconds (optimized from 5s)
+  const [selectedView, setSelectedView] = useState('overview'); // overview, cpu, memory, processes, storage, files, logs, battery
+  const [autoRefresh, setAutoRefresh] = useState(true); // Enable/disable auto-refresh
+  const refreshInterval = 2000; // 2 seconds for smooth real-time updates
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
+  const [lastUpdateTime, setLastUpdateTime] = useState(Date.now());
   const [installedApps, setInstalledApps] = useState([]);
   const [storageAnalysis, setStorageAnalysis] = useState(null);
   const [isLoadingApps, setIsLoadingApps] = useState(false);
@@ -23,8 +29,30 @@ const Dashboard = () => {
   const [isRefreshingProcesses, setIsRefreshingProcesses] = useState(false);
   const [fileSizeFilter, setFileSizeFilter] = useState('large'); // 'large', 'small', or 'all'
   const [processSearchTerm, setProcessSearchTerm] = useState(''); // Search filter for processes
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(''); // Debounced search term
   const [optimizationResult, setOptimizationResult] = useState(null); // Store last optimization result
   const resultsRef = useRef(null); // Reference to scroll to results
+  const searchDebounceTimer = useRef(null); // Timer for debouncing search
+
+  // Debounce search input to prevent UI blocking
+  useEffect(() => {
+    // Clear previous timer
+    if (searchDebounceTimer.current) {
+      clearTimeout(searchDebounceTimer.current);
+    }
+    
+    // Set new timer - only update after 300ms of no typing
+    searchDebounceTimer.current = setTimeout(() => {
+      setDebouncedSearchTerm(processSearchTerm);
+    }, 300);
+    
+    // Cleanup on unmount
+    return () => {
+      if (searchDebounceTimer.current) {
+        clearTimeout(searchDebounceTimer.current);
+      }
+    };
+  }, [processSearchTerm]);
 
   // Fetch system metrics
   const fetchMetrics = async () => {
@@ -47,7 +75,7 @@ const Dashboard = () => {
     }
   };
 
-  // Fetch process list (only when needed)
+  // Fetch process list (manual refresh)
   const fetchProcesses = async () => {
     setIsRefreshingProcesses(true);
     try {
@@ -58,9 +86,55 @@ const Dashboard = () => {
     } catch (error) {
       console.error('Error fetching processes:', error);
     } finally {
-      setIsRefreshingProcesses(false);
+      // Always reset the loading state after a short delay
+      setTimeout(() => setIsRefreshingProcesses(false), 500);
     }
   };
+
+  // Real-time process streaming when Processes tab is active
+  useEffect(() => {
+    if (selectedView !== 'processes') {
+      // Stop streaming when leaving processes view
+      window.electronAPI.system.stopProcessStream().catch(err => 
+        console.error('Error stopping stream:', err)
+      );
+      return;
+    }
+    
+    console.log('📋 Processes view selected - starting real-time stream');
+    
+    // Set up listener for process updates
+    const handleProcessUpdate = (result) => {
+      if (result.success) {
+        setProcesses(result.data);
+        // Don't set isRefreshingProcesses here - only for manual refresh
+      } else {
+        console.error('Process update error:', result.error);
+      }
+    };
+    
+    window.electronAPI.system.onProcessUpdate(handleProcessUpdate);
+    
+    // Start the stream
+    window.electronAPI.system.startProcessStream()
+      .then(result => {
+        if (result.success) {
+          console.log('✅ Process stream started');
+        }
+      })
+      .catch(error => {
+        console.error('❌ Failed to start process stream:', error);
+      });
+    
+    // Cleanup function
+    return () => {
+      console.log('🛑 Stopping process stream');
+      window.electronAPI.system.stopProcessStream().catch(err => 
+        console.error('Error in cleanup:', err)
+      );
+      window.electronAPI.system.removeProcessUpdateListener();
+    };
+  }, [selectedView]);
 
   // Fetch optimization suggestions
   const fetchSuggestions = async () => {
@@ -173,21 +247,58 @@ const Dashboard = () => {
     if (loading) return; // Don't start auto-refresh until initial load completes
     
     const interval = setInterval(() => {
-      if (!isFetching) {
+      if (!isFetching && autoRefresh) {
         fetchMetrics();
       }
     }, refreshInterval);
 
     return () => clearInterval(interval);
-  }, [refreshInterval, loading, isFetching]);
+  }, [refreshInterval, loading, isFetching, autoRefresh]);
   
-  // Auto-fetch processes when switching to processes view - INITIAL LOAD ONLY
+  // Real-time process streaming when Processes tab is active
   useEffect(() => {
-    if (selectedView === 'processes' && processes.length === 0 && !loading && !isRefreshingProcesses) {
-      console.log('📋 Processes view selected - loading processes (initial load only)');
-      fetchProcesses();
+    if (selectedView !== 'processes') {
+      // Stop streaming when leaving processes view
+      window.electronAPI.system.stopProcessStream().catch(err => 
+        console.error('Error stopping stream:', err)
+      );
+      return;
     }
-  }, [selectedView, loading, processes.length, isRefreshingProcesses]);
+    
+    console.log('📋 Processes view selected - starting real-time stream');
+    
+    // Set up listener for process updates
+    const handleProcessUpdate = (result) => {
+      if (result.success) {
+        setProcesses(result.data);
+        // Don't set isRefreshingProcesses here - only for manual refresh
+      } else {
+        console.error('Process update error:', result.error);
+      }
+    };
+    
+    window.electronAPI.system.onProcessUpdate(handleProcessUpdate);
+    
+    // Start the stream
+    window.electronAPI.system.startProcessStream()
+      .then(result => {
+        if (result.success) {
+          console.log('✅ Process stream started');
+        }
+      })
+      .catch(error => {
+        console.error('❌ Failed to start process stream:', error);
+      });
+    
+    // Cleanup function
+    return () => {
+      console.log('🛑 Stopping process stream');
+      window.electronAPI.system.stopProcessStream().catch(err => 
+        console.error('Error in cleanup:', err)
+      );
+      window.electronAPI.system.removeProcessUpdateListener();
+    };
+  }, [selectedView]);
 
   // Auto-fetch installed apps when switching to storage view - ONE TIME ONLY
   useEffect(() => {
@@ -238,14 +349,28 @@ const Dashboard = () => {
 
   // Handle end process
   const handleEndProcess = async (pid, processName) => {
-    if (!confirm(`Are you sure you want to end "${processName}" (PID: ${pid})?`)) {
+    // Count how many processes with the same name exist
+    const sameNameProcesses = processes.filter(p => p.name === processName);
+    const hasMultiple = sameNameProcesses.length > 1;
+    
+    let confirmMessage = `Are you sure you want to end "${processName}" (PID: ${pid})?`;
+    
+    if (hasMultiple) {
+      confirmMessage += `\n\n⚠️ Note: There are ${sameNameProcesses.length} "${processName}" processes running.\n\n` +
+        `Click "OK" to end just this one process (PID: ${pid}), or\n` +
+        `Click "Cancel" then try "End All" option if you want to end all ${sameNameProcesses.length} processes.`;
+    }
+    
+    if (!confirm(confirmMessage)) {
       return;
     }
 
     try {
       const result = await window.electronAPI.system.endProcess(pid, false);
       if (result.success && result.data.success) {
-        alert(`Process ${processName} ended successfully`);
+        alert(`Process ${processName} (PID: ${pid}) ended successfully`);
+        // Clear search term to avoid stuck state
+        setProcessSearchTerm('');
         await fetchProcesses();
         await fetchMetrics();
       } else {
@@ -254,6 +379,32 @@ const Dashboard = () => {
     } catch (error) {
       console.error('Error ending process:', error);
       alert('Error ending process: ' + error.message);
+    }
+  };
+
+  // Handle end all processes with the same name
+  const handleEndAllProcessesByName = async (processName) => {
+    const sameNameProcesses = processes.filter(p => p.name === processName);
+    
+    if (!confirm(`Are you sure you want to end ALL ${sameNameProcesses.length} "${processName}" processes?\n\n` +
+        `This will terminate all running instances and their child processes.`)) {
+      return;
+    }
+
+    try {
+      const result = await window.electronAPI.system.endProcessByName(processName);
+      if (result.success && result.data.success) {
+        alert(`All "${processName}" processes terminated successfully`);
+        // Clear search term to avoid stuck state
+        setProcessSearchTerm('');
+        await fetchProcesses();
+        await fetchMetrics();
+      } else {
+        alert('Failed to end processes: ' + (result.data?.message || result.error));
+      }
+    } catch (error) {
+      console.error('Error ending processes:', error);
+      alert('Error ending processes: ' + error.message);
     }
   };
 
@@ -358,17 +509,44 @@ const Dashboard = () => {
     return `${minutes}m`;
   };
 
-  // Prepare chart data
-  const getChartData = () => {
-    if (!metrics?.history) return [];
+  // Prepare chart data with memoization - only recalculate when metrics.history changes
+  const chartData = useMemo(() => {
+    if (!metrics?.history?.timestamps || metrics.history.timestamps.length === 0) {
+      return [];
+    }
     
     const { cpu, memory, timestamps } = metrics.history;
+    
+    // Pre-calculate all timestamps at once for better performance
     return timestamps.map((timestamp, index) => ({
-      time: new Date(timestamp).toLocaleTimeString(),
-      cpu: cpu[index],
-      memory: memory[index],
+      time: new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      cpu: parseFloat(cpu[index]) || 0,
+      memory: parseFloat(memory[index]) || 0,
     }));
-  };
+  }, [metrics?.history]);
+
+  // Memoize filtered processes to avoid recalculation on every render
+  const filteredProcesses = useMemo(() => {
+    if (!processes || processes.length === 0) return [];
+    
+    // Use debounced search term instead of immediate search term
+    if (!debouncedSearchTerm) return processes;
+    
+    const searchLower = debouncedSearchTerm.toLowerCase();
+    return processes.filter(p => {
+      const nameMatch = p.name && p.name.toLowerCase().includes(searchLower);
+      const commandMatch = p.command && p.command.toLowerCase().includes(searchLower);
+      return nameMatch || commandMatch;
+    });
+  }, [processes, debouncedSearchTerm]); // Use debouncedSearchTerm
+
+  // Memoize displayed processes for the table
+  const displayedProcesses = useMemo(() => {
+    if (debouncedSearchTerm) {
+      return filteredProcesses; // Show all matching when searching
+    }
+    return showAllProcesses ? filteredProcesses : filteredProcesses.slice(0, 20);
+  }, [filteredProcesses, showAllProcesses, debouncedSearchTerm]);
 
   // No more full-screen loading - show UI immediately with loading indicators
 
@@ -465,6 +643,16 @@ const Dashboard = () => {
           }`}
         >
           Storage & Apps
+        </button>
+        <button
+          onClick={() => setSelectedView('files')}
+          className={`px-6 py-2 rounded-lg font-semibold transition-all duration-300 transform hover:scale-105 ${
+            selectedView === 'files'
+              ? 'bg-[#FFC300] text-[#001D3D] shadow-lg'
+              : 'bg-[#003566] text-white hover:bg-[#004A7F]'
+          }`}
+        >
+          File Management+
         </button>
         <button
           onClick={() => setSelectedView('logs')}
@@ -575,37 +763,57 @@ const Dashboard = () => {
           {/* Performance Chart */}
           <div className="bg-[#003566] rounded-lg p-6 border-2 border-[#0077B6]">
             <h3 className="text-[#FFC300] text-xl font-bold mb-4">Performance History</h3>
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={getChartData()}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#0077B6" />
-                <XAxis dataKey="time" stroke="#FFC300" />
-                <YAxis stroke="#FFC300" domain={[0, 100]} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#001D3D',
-                    border: '2px solid #0077B6',
-                    borderRadius: '8px',
-                  }}
-                />
-                <Legend />
-                <Line
-                  type="monotone"
-                  dataKey="cpu"
-                  stroke="#FFC300"
-                  name="CPU %"
-                  strokeWidth={2}
-                  dot={false}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="memory"
-                  stroke="#00B4D8"
-                  name="Memory %"
-                  strokeWidth={2}
-                  dot={false}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            {chartData && chartData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <LineChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#0077B6" />
+                  <XAxis 
+                    dataKey="time" 
+                    stroke="#FFC300"
+                    tick={{ fontSize: 11 }}
+                    interval="preserveStartEnd"
+                    angle={-45}
+                    textAnchor="end"
+                    height={60}
+                    minTickGap={5}
+                  />
+                  <YAxis stroke="#FFC300" domain={[0, 100]} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#001D3D',
+                      border: '2px solid #0077B6',
+                      borderRadius: '8px',
+                    }}
+                  />
+                  <Legend />
+                  <Line
+                    type="monotone"
+                    dataKey="cpu"
+                    stroke="#FFC300"
+                    name="CPU %"
+                    strokeWidth={2}
+                    dot={false}
+                    isAnimationActive={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="memory"
+                    stroke="#00B4D8"
+                    name="Memory %"
+                    strokeWidth={2}
+                    dot={false}
+                    isAnimationActive={false}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-[300px] flex items-center justify-center text-slate-400">
+                <div className="text-center">
+                  <div className="animate-spin rounded-full h-12 w-12 border-4 border-[#FFC300] border-t-transparent mx-auto mb-4"></div>
+                  <p>Loading chart data...</p>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Optimize Button */}
@@ -851,6 +1059,18 @@ const Dashboard = () => {
               Running Processes {processes.length > 0 && (showAllProcesses ? `(All ${processes.length})` : `(Top 20 of ${processes.length})`)}
             </h3>
             <div className="flex space-x-2">
+              {/* Auto-refresh toggle */}
+              <button
+                onClick={() => setAutoRefresh(!autoRefresh)}
+                className={`px-4 py-2 rounded transition-all duration-300 transform hover:scale-105 flex items-center ${
+                  autoRefresh 
+                    ? 'bg-green-600 hover:bg-green-700 text-white' 
+                    : 'bg-gray-600 hover:bg-gray-700 text-white'
+                }`}
+                title={autoRefresh ? 'Auto-refresh ON (2s)' : 'Auto-refresh OFF'}
+              >
+                {autoRefresh ? '🔄 Auto' : '⏸️ Manual'}
+              </button>
               {processes.length > 20 && (
                 <button
                   onClick={() => setShowAllProcesses(!showAllProcesses)}
@@ -890,12 +1110,7 @@ const Dashboard = () => {
             />
             {processSearchTerm && (
               <div className="mt-2 text-[#48CAE4] text-sm">
-                Found {processes.filter(p => {
-                  const searchLower = processSearchTerm.toLowerCase();
-                  const nameMatch = p.name && p.name.toLowerCase().includes(searchLower);
-                  const commandMatch = p.command && p.command.toLowerCase().includes(searchLower);
-                  return nameMatch || commandMatch;
-                }).length} matching processes
+                Found {filteredProcesses.length} matching processes
               </div>
             )}
           </div>
@@ -919,26 +1134,18 @@ const Dashboard = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {(() => {
-                    // Filter processes based on search term (check both name and command)
-                    const filteredProcesses = processSearchTerm
-                      ? processes.filter(p => {
-                          const searchLower = processSearchTerm.toLowerCase();
-                          const nameMatch = p.name && p.name.toLowerCase().includes(searchLower);
-                          const commandMatch = p.command && p.command.toLowerCase().includes(searchLower);
-                          return nameMatch || commandMatch;
-                        })
-                      : processes;
+                  {displayedProcesses.map((proc) => {
+                    // Check if multiple processes with same name exist
+                    const sameNameCount = processes.filter(p => p.name === proc.name).length;
+                    const hasMultiple = sameNameCount > 1;
                     
-                    // Show top 20 or all based on toggle (unless searching)
-                    const displayProcesses = processSearchTerm 
-                      ? filteredProcesses 
-                      : (showAllProcesses ? filteredProcesses : filteredProcesses.slice(0, 20));
-                    
-                    return displayProcesses.map((proc) => (
+                    return (
                       <tr key={proc.pid} className="border-b border-[#0077B6] hover:bg-[#001D3D] transition-colors duration-200">
                         <td className="py-2 px-4">{proc.pid}</td>
-                        <td className="py-2 px-4 max-w-xs truncate" title={proc.command}>{proc.name}</td>
+                        <td className="py-2 px-4 max-w-xs truncate" title={proc.command}>
+                          {proc.name}
+                          {hasMultiple && <span className="ml-2 text-xs text-yellow-400">({sameNameCount})</span>}
+                        </td>
                         <td className={`py-2 px-4 text-right font-mono ${
                           parseFloat(proc.cpu || 0) > 50 ? 'text-red-400' :
                           parseFloat(proc.cpu || 0) > 20 ? 'text-orange-400' :
@@ -951,16 +1158,27 @@ const Dashboard = () => {
                           {proc.memoryPercent !== undefined && proc.memoryPercent !== null ? `${proc.memoryPercent}%` : '0.00%'}
                         </td>
                         <td className="py-2 px-4 text-center">
-                          <button
-                            onClick={() => handleEndProcess(proc.pid, proc.name)}
-                            className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm transition-all duration-300 transform hover:scale-110"
-                          >
-                            End Task
-                          </button>
+                          <div className="flex gap-1 justify-center">
+                            <button
+                              onClick={() => handleEndProcess(proc.pid, proc.name)}
+                              className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm transition-all duration-300 transform hover:scale-110"
+                            >
+                              End Task
+                            </button>
+                            {hasMultiple && (
+                              <button
+                                onClick={() => handleEndAllProcessesByName(proc.name)}
+                                className="bg-orange-600 hover:bg-orange-700 text-white px-2 py-1 rounded text-xs transition-all duration-300 transform hover:scale-110"
+                                title={`End all ${sameNameCount} "${proc.name}" processes`}
+                              >
+                                End All
+                              </button>
+                            )}
+                          </div>
                         </td>
                       </tr>
-                    ));
-                  })()}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1292,17 +1510,51 @@ const Dashboard = () => {
         </div>
       )}
 
+      {/* Files & Data View */}
+      {selectedView === 'files' && (
+        <div className="animate-fadeIn">
+          <Suspense fallback={
+            <div className="flex items-center justify-center h-96 bg-[#003566] rounded-lg border-2 border-[#0077B6]">
+              <div className="text-center">
+                <div className="animate-spin rounded-full h-12 w-12 border-4 border-[#FFC300] border-t-transparent mx-auto mb-4"></div>
+                <p className="text-white">Loading Files Manager...</p>
+              </div>
+            </div>
+          }>
+            <FilesManager />
+          </Suspense>
+        </div>
+      )}
+
       {/* Logs View */}
       {selectedView === 'logs' && (
         <div className="animate-fadeIn">
-          <LogsViewer />
+          <Suspense fallback={
+            <div className="flex items-center justify-center h-96 bg-[#003566] rounded-lg border-2 border-[#0077B6]">
+              <div className="text-center">
+                <div className="animate-spin rounded-full h-12 w-12 border-4 border-[#FFC300] border-t-transparent mx-auto mb-4"></div>
+                <p className="text-white">Loading Logs Viewer...</p>
+              </div>
+            </div>
+          }>
+            <LogsViewer />
+          </Suspense>
         </div>
       )}
 
       {/* Battery View */}
       {selectedView === 'battery' && (
         <div className="animate-fadeIn">
-          <BatteryCenter />
+          <Suspense fallback={
+            <div className="flex items-center justify-center h-96 bg-[#003566] rounded-lg border-2 border-[#0077B6]">
+              <div className="text-center">
+                <div className="animate-spin rounded-full h-12 w-12 border-4 border-[#FFC300] border-t-transparent mx-auto mb-4"></div>
+                <p className="text-white">Loading Battery Center...</p>
+              </div>
+            </div>
+          }>
+            <BatteryCenter />
+          </Suspense>
         </div>
       )}
     </div>
