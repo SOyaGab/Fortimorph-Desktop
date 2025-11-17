@@ -1,6 +1,9 @@
 import { useState, useEffect, useMemo, useCallback, memo } from 'react';
-import { FolderOpen, Save, RefreshCw, Trash2, CheckCircle, AlertCircle, Download, HardDrive, Lock, Unlock, QrCode } from 'lucide-react';
+import { FolderOpen, Save, RefreshCw, Trash2, CheckCircle, AlertCircle, Download, HardDrive, Lock, Unlock, QrCode, Copy } from 'lucide-react';
 import TokenConfigModal from './TokenConfigModal';
+import BackupRecoveryKeyModal from './BackupRecoveryKeyModal'; // OPTION B: Simplified modal
+import DeletedFilesManager from './DeletedFilesManager';
+import DuplicateFilesManager from './DuplicateFilesManager';
 
 /**
  * Memoized BackupItem component to prevent unnecessary re-renders
@@ -55,13 +58,25 @@ const BackupItem = memo(({ backup, onRestore, onVerify, onDelete, onGenerateToke
             <CheckCircle className="w-4 h-4" />
             Verify
           </button>
+          {/* 
+            OPTION A (Current): Uses TokenConfigModal - Full featured but complex
+            OPTION B (Alternative): Uses BackupRecoveryKeyModal - Simpler, more user-friendly
+            
+            To switch to Option B:
+            1. Replace onGenerateToken with onGenerateRecoveryKey in BackupItem props
+            2. Update the handler call below
+          */}
           <button
             onClick={() => onGenerateToken(backup)}
-            className="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg transition flex items-center gap-2"
-            title="Generate verification token"
+            className="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg transition flex flex-col items-center gap-1 group relative"
+            title="Generate recovery key for cross-device restore"
           >
             <QrCode className="w-4 h-4" />
-            Token
+            <span className="text-xs">Recovery Key</span>
+            {/* OPTION A: Tooltip on hover */}
+            <span className="absolute bottom-full mb-2 hidden group-hover:block bg-gray-900 text-white text-xs rounded px-2 py-1 whitespace-nowrap z-10">
+              For device transfers →
+            </span>
           </button>
           <button
             onClick={() => onDelete(backup)}
@@ -88,6 +103,9 @@ BackupItem.displayName = 'BackupItem';
  * - Delete old backups
  */
 export default function BackupManager() {
+  // Tab state
+  const [activeTab, setActiveTab] = useState('backups'); // 'backups', 'deleted', 'duplicates'
+  
   const [backups, setBackups] = useState([]);
   const [loading, setLoading] = useState(false);
   const [backupInProgress, setBackupInProgress] = useState(false);
@@ -99,9 +117,13 @@ export default function BackupManager() {
   const [showRestoreDialog, setShowRestoreDialog] = useState(false);
   const [verificationResult, setVerificationResult] = useState(null);
   
-  // Token modal state
+  // Token modal state (OPTION A: Complex modal)
   const [showTokenModal, setShowTokenModal] = useState(false);
   const [tokenModalData, setTokenModalData] = useState({});
+  
+  // OPTION B: Simplified Recovery Key Modal
+  const [showRecoveryKeyModal, setShowRecoveryKeyModal] = useState(false);
+  const [selectedBackupForKey, setSelectedBackupForKey] = useState(null);
   
   // Verification confirmation modal state
   const [showVerifyConfirm, setShowVerifyConfirm] = useState(false);
@@ -353,6 +375,7 @@ export default function BackupManager() {
     }
   }, [loadBackups]);
 
+  // OPTION A: Complex token modal handler
   const handleGenerateToken = useCallback((backup) => {
     setTokenModalData({
       type: 'backup',
@@ -371,6 +394,12 @@ export default function BackupManager() {
       }
     });
     setShowTokenModal(true);
+  }, []);
+
+  // OPTION B: Simplified recovery key handler (UNCOMMENT TO USE)
+  const handleGenerateRecoveryKey = useCallback((backup) => {
+    setSelectedBackupForKey(backup);
+    setShowRecoveryKeyModal(true);
   }, []);
 
   const handleTokenGenerated = useCallback((result) => {
@@ -401,41 +430,87 @@ export default function BackupManager() {
     <div className="space-y-6">
       <div className="max-w-7xl mx-auto">
         {/* Header */}
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h1 className="text-3xl font-bold flex items-center gap-3 text-white">
-              <HardDrive className="w-8 h-8 text-blue-400" />
-              Backup Manager
-            </h1>
-            <p className="text-gray-400 mt-2">Secure encrypted backups with incremental support</p>
-          </div>
-          <div className="flex gap-3">
-            <button
-              onClick={handleOpenFolder}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition flex items-center gap-2"
-              title="Open Backups Folder"
-            >
-              <FolderOpen className="w-4 h-4" />
-              Open Folder
-            </button>
-            <button
-              onClick={loadBackups}
-              disabled={loading}
-              className="px-4 py-2 bg-[#003566] hover:bg-[#0077B6] text-white rounded-lg transition flex items-center gap-2 disabled:opacity-50"
-            >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-              Refresh
-            </button>
-            <button
-              onClick={() => setShowCreateDialog(true)}
-              disabled={backupInProgress}
-              className="px-6 py-2 bg-[#FFC300] hover:bg-[#FFD60A] text-[#001D3D] font-semibold rounded-lg transition flex items-center gap-2 disabled:opacity-50"
-            >
-              <Save className="w-4 h-4" />
-              Create Backup
-            </button>
-          </div>
+        <div className="mb-6">
+          <h1 className="text-3xl font-bold flex items-center gap-3 text-white">
+            <HardDrive className="w-8 h-8 text-blue-400" />
+            Backup & Storage Manager
+          </h1>
+          <p className="text-gray-400 mt-2">Manage backups, deleted files, and find duplicates</p>
         </div>
+
+        {/* Tabs */}
+        <div className="flex gap-2 mb-6 border-b border-gray-700">
+          <button
+            onClick={() => setActiveTab('backups')}
+            className={`px-6 py-3 font-medium transition flex items-center gap-2 ${
+              activeTab === 'backups'
+                ? 'text-[#FFC300] border-b-2 border-[#FFC300]'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            <HardDrive className="w-5 h-5" />
+            Backups
+          </button>
+          <button
+            onClick={() => setActiveTab('deleted')}
+            className={`px-6 py-3 font-medium transition flex items-center gap-2 ${
+              activeTab === 'deleted'
+                ? 'text-[#FFC300] border-b-2 border-[#FFC300]'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            <Trash2 className="w-5 h-5" />
+            Deleted Files
+          </button>
+          <button
+            onClick={() => setActiveTab('duplicates')}
+            className={`px-6 py-3 font-medium transition flex items-center gap-2 ${
+              activeTab === 'duplicates'
+                ? 'text-[#FFC300] border-b-2 border-[#FFC300]'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            <Copy className="w-5 h-5" />
+            Duplicate Files
+          </button>
+        </div>
+
+        {/* Tab Content */}
+        {activeTab === 'backups' && (
+          <>
+            {/* Backup Tab Header Actions */}
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-2xl font-bold text-white">Backups</h2>
+                <p className="text-gray-400 mt-1">Secure encrypted backups with incremental support</p>
+              </div>
+              <div className="flex gap-3">
+                <button
+                  onClick={handleOpenFolder}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition flex items-center gap-2"
+                  title="Open Backups Folder"
+                >
+                  <FolderOpen className="w-4 h-4" />
+                  Open Folder
+                </button>
+                <button
+                  onClick={loadBackups}
+                  disabled={loading}
+                  className="px-4 py-2 bg-[#003566] hover:bg-[#0077B6] text-white rounded-lg transition flex items-center gap-2 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                  Refresh
+                </button>
+                <button
+                  onClick={() => setShowCreateDialog(true)}
+                  disabled={backupInProgress}
+                  className="px-6 py-2 bg-[#FFC300] hover:bg-[#FFD60A] text-[#001D3D] font-semibold rounded-lg transition flex items-center gap-2 disabled:opacity-50"
+                >
+                  <Save className="w-4 h-4" />
+                  Create Backup
+                </button>
+              </div>
+            </div>
 
         {/* Progress Display */}
         {progress && (
@@ -766,6 +841,18 @@ export default function BackupManager() {
             )}
           </div>
         )}
+          </>
+        )}
+
+        {/* Deleted Files Tab */}
+        {activeTab === 'deleted' && (
+          <DeletedFilesManager />
+        )}
+
+        {/* Duplicate Files Tab */}
+        {activeTab === 'duplicates' && (
+          <DuplicateFilesManager />
+        )}
       </div>
       
       {/* Verification Confirmation Modal */}
@@ -828,6 +915,21 @@ export default function BackupManager() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* OPTION B: Simplified Recovery Key Modal */}
+      {showRecoveryKeyModal && selectedBackupForKey && (
+        <BackupRecoveryKeyModal
+          isOpen={showRecoveryKeyModal}
+          onClose={() => {
+            setShowRecoveryKeyModal(false);
+            setSelectedBackupForKey(null);
+          }}
+          backup={selectedBackupForKey}
+          onSuccess={(result) => {
+            console.log('Recovery key generated:', result.tokenId);
+          }}
+        />
       )}
       
       {/* Token Configuration Modal */}

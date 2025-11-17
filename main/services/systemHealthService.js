@@ -19,6 +19,7 @@ class SystemHealthService {
     this.monitoringInterval = null;
     this.healthHistory = [];
     this.maxHistoryPoints = 288; // 24 hours at 5-minute intervals
+    this.getUserId = null; // Function to get current user ID
     
     // Temperature thresholds (Celsius)
     this.tempThresholds = {
@@ -39,6 +40,13 @@ class SystemHealthService {
   }
 
   /**
+   * Set function to get current user ID
+   */
+  setUserIdProvider(getUserIdFn) {
+    this.getUserId = getUserIdFn;
+  }
+
+  /**
    * Initialize system health monitoring
    */
   async initialize() {
@@ -51,19 +59,21 @@ class SystemHealthService {
       // Start monitoring
       this.startMonitoring();
       
+      const userId = this.getUserId ? this.getUserId() : null;
       this.db.addLog('system_health', 'System health monitoring initialized', {
         cpu: initialHealth.cpu?.temperature || 'N/A',
         memory: initialHealth.memory?.usagePercent || 'N/A'
-      }, 'info');
+      }, 'info', userId);
       
       console.log('System health monitoring initialized successfully');
       return true;
       
     } catch (error) {
       console.error('Failed to initialize system health monitoring:', error);
+      const userId = this.getUserId ? this.getUserId() : null;
       this.db.addLog('system_health', 'Failed to initialize system health monitoring', {
         error: error.message
-      }, 'error');
+      }, 'error', userId);
       return false;
     }
   }
@@ -361,8 +371,9 @@ class SystemHealthService {
       }
       
       // Log critical alerts
+      const userId = this.getUserId ? this.getUserId() : null;
       alerts.filter(a => a.type === 'critical').forEach(alert => {
-        this.db.addLog('system_health', alert.message, alert, 'warning');
+        this.db.addLog('system_health', alert.message, alert, 'warning', userId);
       });
     }
   }
@@ -649,7 +660,8 @@ class SystemHealthService {
       results.success = results.actions.some(a => a.status === 'success');
       
       console.log(`[Cool Down] ✅ Cooldown completed with ${results.actions.length} actions`);
-      this.db.addLog('system_health', 'System cooldown completed', results, 'info');
+      const userId = this.getUserId ? this.getUserId() : null;
+      this.db.addLog('system_health', 'System cooldown completed', results, 'info', userId);
       
       return results;
       
@@ -702,7 +714,8 @@ class SystemHealthService {
   shutdown() {
     console.log('Shutting down system health service...');
     this.stopMonitoring();
-    this.db.addLog('system_health', 'System health service shut down', null, 'info');
+    const userId = this.getUserId ? this.getUserId() : null;
+    this.db.addLog('system_health', 'System health service shut down', null, 'info', userId);
   }
 }
 

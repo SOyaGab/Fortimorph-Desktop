@@ -22,7 +22,9 @@ import {
   Copy,
   Download,
   RefreshCw,
-  Infinity
+  Infinity,
+  Bluetooth,
+  Send
 } from 'lucide-react';
 
 const TokenConfigModal = ({ isOpen, onClose, initialData = {}, onSuccess }) => {
@@ -38,9 +40,9 @@ const TokenConfigModal = ({ isOpen, onClose, initialData = {}, onSuccess }) => {
   const [diagnosticReports, setDiagnosticReports] = useState([]);
   const [selectedFile, setSelectedFile] = useState(null);
 
-  // Form state - Default to 'custom' type to encourage user-specified naming
+  // Form state - OPTION A: Default to 'backup' type (most common use case)
   const [form, setForm] = useState({
-    type: initialData.type || 'custom',
+    type: initialData.type || 'backup',
     resourceSelectionMode: initialData.resourceSelectionMode || 'browse', // Use initialData if provided
     resourceId: initialData.resourceId || '',
     resourceName: initialData.resourceName || '',
@@ -49,17 +51,22 @@ const TokenConfigModal = ({ isOpen, onClose, initialData = {}, onSuccess }) => {
     customTypeName: initialData.customTypeName || ''
   });
 
-  // Token types
+  // Token types - OPTION A: Simplified to essential use cases only
   const tokenTypes = [
-    { value: 'backup', label: 'Backup Verification', icon: HardDrive },
-    { value: 'file', label: 'File Verification', icon: FileText },
-    { value: 'diagnostic', label: 'Diagnostic Report', icon: Activity },
-    { value: 'system-config', label: 'System Configuration', icon: Settings },
-    { value: 'user-profile', label: 'User Profile', icon: User },
-    { value: 'settings-backup', label: 'Settings Backup', icon: Database },
-    { value: 'registry-snapshot', label: 'Registry Snapshot', icon: Shield },
-    { value: 'generic', label: 'Generic', icon: FileText },
-    { value: 'custom', label: 'Custom (specify name)', icon: FileText }
+    { 
+      value: 'backup', 
+      label: 'Backup Sharing Token', 
+      icon: HardDrive,
+      description: 'Transfer backup to another device',
+      useCase: 'Use when: Restoring backup on a different computer'
+    },
+    { 
+      value: 'file', 
+      label: 'File Integrity Seal', 
+      icon: FileText,
+      description: 'One-time verification stamp for files',
+      useCase: 'Use when: You need proof a file hasn\'t been modified'
+    }
   ];
 
   // TTL options
@@ -201,20 +208,20 @@ const TokenConfigModal = ({ isOpen, onClose, initialData = {}, onSuccess }) => {
     setError(null);
     setSuccess(null);
 
-    // Validation
+    // OPTION A: Enhanced validation with clearer error messages
     if (!form.resourceId) {
-      setError('Please select a resource or browse for a file');
+      setError('❌ No resource selected. Please choose a backup or browse for a file to create a recovery key.');
       return;
     }
 
     if (form.type === 'custom' && !form.customTypeName) {
-      setError('Please enter a custom type name');
+      setError('❌ Custom type name required. Please enter a descriptive name for your custom token type.');
       return;
     }
 
     // Check if TTL is undefined (not selected), but allow null (permanent)
     if (form.ttl === undefined) {
-      setError('Please select a time-to-live option');
+      setError('❌ Please select how long the recovery key should be valid (24 hours or permanent).');
       return;
     }
 
@@ -416,6 +423,28 @@ const TokenConfigModal = ({ isOpen, onClose, initialData = {}, onSuccess }) => {
             {generatedToken ? (
               /* Generated Token Display */
               <div className="space-y-6">
+                {/* OPTION A: Workflow Guide */}
+                <div className="bg-gradient-to-r from-green-500/20 to-blue-500/20 border border-green-500/50 rounded-lg p-4">
+                  <h4 className="text-white font-semibold mb-3 flex items-center gap-2">
+                    <CheckCircle2 className="w-5 h-5 text-green-400" />
+                    How to Use This Recovery Key
+                  </h4>
+                  <ol className="space-y-2 text-sm text-gray-200">
+                    <li className="flex items-start gap-2">
+                      <span className="bg-green-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs flex-shrink-0 mt-0.5">1</span>
+                      <span><strong>Save this key:</strong> Download QR code or copy the token string below</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="bg-green-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs flex-shrink-0 mt-0.5">2</span>
+                      <span><strong>Transfer to another device:</strong> Use USB, email, or cloud storage</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="bg-green-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs flex-shrink-0 mt-0.5">3</span>
+                      <span><strong>Restore on new device:</strong> Go to Verification Center → Verify Token → Enter/Scan this key</span>
+                    </li>
+                  </ol>
+                </div>
+
                 {/* QR Code */}
                 <div className="flex justify-center">
                   <div className="bg-white p-6 rounded-xl shadow-lg">
@@ -525,28 +554,76 @@ const TokenConfigModal = ({ isOpen, onClose, initialData = {}, onSuccess }) => {
               )}
 
               {/* Actions */}
-              <div className="flex gap-3">
-                {generatedToken.qrCode && (
+              <div className="space-y-3">
+                <div className="flex gap-3">
+                  {generatedToken.qrCode && (
+                    <button
+                      onClick={downloadQRCode}
+                      className="flex-1 bg-blue-500 hover:bg-blue-600 text-white py-3 px-4 rounded-lg font-medium transition flex items-center justify-center gap-2"
+                    >
+                      <Download className="w-5 h-5" />
+                      Download QR
+                    </button>
+                  )}
                   <button
-                    onClick={downloadQRCode}
-                    className="flex-1 bg-blue-500 hover:bg-blue-600 text-white py-3 px-4 rounded-lg font-medium transition flex items-center justify-center gap-2"
+                    onClick={handleClose}
+                    className="flex-1 bg-green-500 hover:bg-green-600 text-white py-3 px-4 rounded-lg font-medium transition flex items-center justify-center gap-2"
                   >
-                    <Download className="w-5 h-5" />
-                    Download QR Code
+                    <CheckCircle2 className="w-5 h-5" />
+                    Done
                   </button>
+                </div>
+
+                {/* BLUETOOTH TRANSFER OPTION */}
+                {generatedToken.qrCode && (
+                  <>
+                    <div className="relative">
+                      <div className="absolute inset-0 flex items-center">
+                        <div className="w-full border-t border-gray-700"></div>
+                      </div>
+                      <div className="relative flex justify-center text-xs">
+                        <span className="px-2 bg-gray-800 text-gray-400">Bluetooth Transfer</span>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-purple-500/20 to-blue-500/20 border border-purple-500/50 rounded-lg p-4">
+                      <div className="flex items-start gap-3">
+                        <div className="p-2 bg-purple-500/30 rounded-lg">
+                          <Bluetooth className="w-5 h-5 text-purple-300" />
+                        </div>
+                        <div className="flex-1">
+                          <h4 className="text-white font-semibold mb-2 flex items-center gap-2">
+                            📱 Scan QR Code for Bluetooth Transfer
+                          </h4>
+                          <p className="text-purple-200 text-sm leading-relaxed">
+                            The QR code above contains the recovery key <strong>and Bluetooth pairing data</strong>. 
+                            When you scan it with another device, it will automatically initiate a Bluetooth connection 
+                            to securely transfer the recovery key wirelessly.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </>
                 )}
-                <button
-                  onClick={handleClose}
-                  className="flex-1 bg-green-500 hover:bg-green-600 text-white py-3 px-4 rounded-lg font-medium transition flex items-center justify-center gap-2"
-                >
-                  <CheckCircle2 className="w-5 h-5" />
-                  Done
-                </button>
               </div>
             </div>
           ) : (
             /* Configuration Form */
             <div className="space-y-4">
+              {/* OPTION A: Help Banner */}
+              <div className="bg-blue-500/20 border border-blue-500/50 rounded-lg p-4">
+                <div className="flex items-start gap-3">
+                  <Shield className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <h4 className="text-white font-semibold mb-1">What are Recovery Tokens?</h4>
+                    <p className="text-blue-200 text-sm leading-relaxed">
+                      Recovery tokens allow you to securely transfer and verify backups across devices. 
+                      Generate a QR code or text key, then scan/enter it on another computer to restore your data.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
               {/* Token Type */}
               <div>
                 <label className="block text-sm font-medium text-gray-300 mb-2">
@@ -566,6 +643,14 @@ const TokenConfigModal = ({ isOpen, onClose, initialData = {}, onSuccess }) => {
                     </option>
                   ))}
                 </select>
+                
+                {/* OPTION A: Show use case for selected type */}
+                {tokenTypes.find(t => t.value === form.type)?.useCase && (
+                  <p className="mt-2 text-xs text-gray-400 flex items-start gap-2">
+                    <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                    {tokenTypes.find(t => t.value === form.type).useCase}
+                  </p>
+                )}
               </div>
 
               {/* Custom Type Name */}

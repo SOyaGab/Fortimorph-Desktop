@@ -32,15 +32,24 @@ class LogsService {
   }
 
   /**
+   * Set function to get current user ID
+   */
+  setUserIdProvider(getUserIdFn) {
+    this.getUserId = getUserIdFn;
+  }
+
+  /**
    * Log info message (wrapper for db.addLog)
    * @param {string} message - Log message
    * @param {string} type - Log type/category
    * @param {object} metadata - Additional metadata
+   * @param {string} userId - Optional user ID (auto-determined if not provided)
    */
-  async info(message, type = 'system', metadata = null) {
+  async info(message, type = 'system', metadata = null, userId = null) {
     try {
       const metadataStr = metadata ? JSON.stringify(metadata) : null;
-      this.db.addLog(type, message, metadataStr, 'info');
+      const user = userId || (this.getUserId ? this.getUserId() : null);
+      this.db.addLog(type, message, metadataStr, 'info', user);
     } catch (error) {
       console.error('Failed to log info:', error);
     }
@@ -51,11 +60,13 @@ class LogsService {
    * @param {string} message - Log message
    * @param {string} type - Log type/category
    * @param {object} metadata - Additional metadata
+   * @param {string} userId - Optional user ID (auto-determined if not provided)
    */
-  async error(message, type = 'system', metadata = null) {
+  async error(message, type = 'system', metadata = null, userId = null) {
     try {
       const metadataStr = metadata ? JSON.stringify(metadata) : null;
-      this.db.addLog(type, message, metadataStr, 'error');
+      const user = userId || (this.getUserId ? this.getUserId() : null);
+      this.db.addLog(type, message, metadataStr, 'error', user);
     } catch (error) {
       console.error('Failed to log error:', error);
     }
@@ -66,11 +77,13 @@ class LogsService {
    * @param {string} message - Log message
    * @param {string} type - Log type/category
    * @param {object} metadata - Additional metadata
+   * @param {string} userId - Optional user ID (auto-determined if not provided)
    */
-  async warn(message, type = 'system', metadata = null) {
+  async warn(message, type = 'system', metadata = null, userId = null) {
     try {
       const metadataStr = metadata ? JSON.stringify(metadata) : null;
-      this.db.addLog(type, message, metadataStr, 'warn');
+      const user = userId || (this.getUserId ? this.getUserId() : null);
+      this.db.addLog(type, message, metadataStr, 'warn', user);
     } catch (error) {
       console.error('Failed to log warning:', error);
     }
@@ -81,11 +94,13 @@ class LogsService {
    * @param {string} message - Log message
    * @param {string} type - Log type/category
    * @param {object} metadata - Additional metadata
+   * @param {string} userId - Optional user ID (auto-determined if not provided)
    */
-  async debug(message, type = 'system', metadata = null) {
+  async debug(message, type = 'system', metadata = null, userId = null) {
     try {
       const metadataStr = metadata ? JSON.stringify(metadata) : null;
-      this.db.addLog(type, message, metadataStr, 'debug');
+      const user = userId || (this.getUserId ? this.getUserId() : null);
+      this.db.addLog(type, message, metadataStr, 'debug', user);
     } catch (error) {
       console.error('Failed to log debug:', error);
     }
@@ -120,7 +135,8 @@ class LogsService {
       
       await fs.writeFile(filepath, csv, 'utf-8');
       
-      this.db.addLog('logs', `Exported ${logs.length} logs to CSV: ${filename}`, null, 'info');
+      const userId = filters?.userId || null;
+      this.db.addLog('logs', `Exported ${logs.length} logs to CSV: ${filename}`, null, 'info', userId);
       
       return {
         success: true,
@@ -130,7 +146,8 @@ class LogsService {
       };
     } catch (error) {
       console.error('Failed to export logs to CSV:', error);
-      this.db.addLog('logs', 'Failed to export logs to CSV', { error: error.message }, 'error');
+      const userId = filters?.userId || null;
+      this.db.addLog('logs', 'Failed to export logs to CSV', { error: error.message }, 'error', userId);
       throw error;
     }
   }
@@ -166,7 +183,8 @@ class LogsService {
       
       await fs.writeFile(filepath, JSON.stringify(jsonData, null, 2), 'utf-8');
       
-      this.db.addLog('logs', `Exported ${logs.length} logs to JSON: ${filename}`, null, 'info');
+      const userId = filters?.userId || null;
+      this.db.addLog('logs', `Exported ${logs.length} logs to JSON: ${filename}`, null, 'info', userId);
       
       return {
         success: true,
@@ -176,7 +194,8 @@ class LogsService {
       };
     } catch (error) {
       console.error('Failed to export logs to JSON:', error);
-      this.db.addLog('logs', 'Failed to export logs to JSON', { error: error.message }, 'error');
+      const userId = filters?.userId || null;
+      this.db.addLog('logs', 'Failed to export logs to JSON', { error: error.message }, 'error', userId);
       throw error;
     }
   }
@@ -219,7 +238,8 @@ class LogsService {
       
       await fs.writeFile(filepath, xml, 'utf-8');
       
-      this.db.addLog('logs', `Exported ${logs.length} logs to XML: ${filename}`, null, 'info');
+      const userId = filters?.userId || null;
+      this.db.addLog('logs', `Exported ${logs.length} logs to XML: ${filename}`, null, 'info', userId);
       
       return {
         success: true,
@@ -229,7 +249,8 @@ class LogsService {
       };
     } catch (error) {
       console.error('Failed to export logs to XML:', error);
-      this.db.addLog('logs', 'Failed to export logs to XML', { error: error.message }, 'error');
+      const userId = filters?.userId || null;
+      this.db.addLog('logs', 'Failed to export logs to XML', { error: error.message }, 'error', userId);
       throw error;
     }
   }
@@ -268,7 +289,8 @@ class LogsService {
       
       await fs.writeFile(filepath, txt, 'utf-8');
       
-      this.db.addLog('logs', `Exported ${logs.length} logs to TXT: ${filename}`, null, 'info');
+      const userId = filters?.userId || null;
+      this.db.addLog('logs', `Exported ${logs.length} logs to TXT: ${filename}`, null, 'info', userId);
       
       return {
         success: true,
@@ -278,7 +300,8 @@ class LogsService {
       };
     } catch (error) {
       console.error('Failed to export logs to TXT:', error);
-      this.db.addLog('logs', 'Failed to export logs to TXT', { error: error.message }, 'error');
+      const userId = filters?.userId || null;
+      this.db.addLog('logs', 'Failed to export logs to TXT', { error: error.message }, 'error', userId);
       throw error;
     }
   }
@@ -388,7 +411,8 @@ class LogsService {
       
       await fs.writeFile(filepath, html, 'utf-8');
       
-      this.db.addLog('logs', `Exported ${logs.length} logs to HTML: ${filename}`, null, 'info');
+      const userId = filters?.userId || null;
+      this.db.addLog('logs', `Exported ${logs.length} logs to HTML: ${filename}`, null, 'info', userId);
       
       return {
         success: true,
@@ -398,7 +422,8 @@ class LogsService {
       };
     } catch (error) {
       console.error('Failed to export logs to HTML:', error);
-      this.db.addLog('logs', 'Failed to export logs to HTML', { error: error.message }, 'error');
+      const userId = filters?.userId || null;
+      this.db.addLog('logs', 'Failed to export logs to HTML', { error: error.message }, 'error', userId);
       throw error;
     }
   }
@@ -449,7 +474,8 @@ class LogsService {
       
       await fs.writeFile(filepath, md, 'utf-8');
       
-      this.db.addLog('logs', `Exported ${logs.length} logs to Markdown: ${filename}`, null, 'info');
+      const userId = filters?.userId || null;
+      this.db.addLog('logs', `Exported ${logs.length} logs to Markdown: ${filename}`, null, 'info', userId);
       
       return {
         success: true,
@@ -459,7 +485,8 @@ class LogsService {
       };
     } catch (error) {
       console.error('Failed to export logs to Markdown:', error);
-      this.db.addLog('logs', 'Failed to export logs to Markdown', { error: error.message }, 'error');
+      const userId = filters?.userId || null;
+      this.db.addLog('logs', 'Failed to export logs to Markdown', { error: error.message }, 'error', userId);
       throw error;
     }
   }
@@ -517,8 +544,9 @@ class LogsService {
         const archive = archiver('zip', { zlib: { level: 9 } });
         
         output.on('close', () => {
+          const userId = filters?.userId || null;
           this.db.addLog('logs', `Exported diagnostic package: ${filename}`, 
-            { size: archive.pointer() }, 'info');
+            { size: archive.pointer() }, 'info', userId);
           
           resolve({
             success: true,
@@ -529,8 +557,9 @@ class LogsService {
         });
         
         archive.on('error', (err) => {
+          const userId = filters?.userId || null;
           this.db.addLog('logs', 'Failed to create diagnostic ZIP', 
-            { error: err.message }, 'error');
+            { error: err.message }, 'error', userId);
           reject(err);
         });
         
@@ -577,8 +606,9 @@ Note: Sensitive information like file paths and user data have been sanitized.
         
       } catch (error) {
         console.error('Failed to export diagnostic ZIP:', error);
+        const userId = filters?.userId || null;
         this.db.addLog('logs', 'Failed to export diagnostic ZIP', 
-          { error: error.message }, 'error');
+          { error: error.message }, 'error', userId);
         reject(error);
       }
       };

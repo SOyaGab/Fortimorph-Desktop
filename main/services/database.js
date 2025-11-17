@@ -114,11 +114,54 @@ class DatabaseService {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS settings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        key TEXT UNIQUE NOT NULL,
+        user_id TEXT,
+        key TEXT NOT NULL,
         value TEXT,
         updated_at INTEGER DEFAULT (strftime('%s', 'now'))
       )
     `);
+    
+    // Add user_id column to settings if it doesn't exist
+    try {
+      const checkStmt = this.db.prepare("PRAGMA table_info(settings)");
+      let hasUserId = false;
+      let hasUniqueConstraint = true; // Check if key column still has UNIQUE constraint
+      while (checkStmt.step()) {
+        const row = checkStmt.getAsObject();
+        if (row.name === 'user_id') {
+          hasUserId = true;
+        }
+      }
+      checkStmt.free();
+      
+      if (!hasUserId) {
+        console.log('Migrating settings table: adding user_id column');
+        this.db.exec(`ALTER TABLE settings ADD COLUMN user_id TEXT`);
+        
+        // Drop the UNIQUE constraint on key by recreating the table
+        console.log('Migrating settings table: removing UNIQUE constraint on key to allow per-user settings');
+        this.db.exec(`
+          CREATE TABLE settings_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            key TEXT NOT NULL,
+            value TEXT,
+            updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+          );
+          
+          INSERT INTO settings_new (id, user_id, key, value, updated_at)
+          SELECT id, user_id, key, value, updated_at FROM settings;
+          
+          DROP TABLE settings;
+          
+          ALTER TABLE settings_new RENAME TO settings;
+          
+          CREATE INDEX idx_settings_user_key ON settings(user_id, key);
+        `);
+      }
+    } catch (error) {
+      console.warn('Migration check for settings table:', error.message);
+    }
 
     // Logs table
     this.db.exec(`
@@ -168,6 +211,7 @@ class DatabaseService {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS backups (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
         name TEXT NOT NULL,
         source_path TEXT NOT NULL,
         backup_path TEXT NOT NULL,
@@ -178,11 +222,33 @@ class DatabaseService {
         created_at INTEGER DEFAULT (strftime('%s', 'now'))
       )
     `);
+    
+    // Add user_id column to backups if it doesn't exist
+    try {
+      const checkStmt = this.db.prepare("PRAGMA table_info(backups)");
+      let hasUserId = false;
+      while (checkStmt.step()) {
+        const row = checkStmt.getAsObject();
+        if (row.name === 'user_id') {
+          hasUserId = true;
+          break;
+        }
+      }
+      checkStmt.free();
+      
+      if (!hasUserId) {
+        console.log('Migrating backups table: adding user_id column');
+        this.db.exec(`ALTER TABLE backups ADD COLUMN user_id TEXT`);
+      }
+    } catch (error) {
+      console.warn('Migration check for backups table:', error.message);
+    }
 
     // Deletion manifest table (quarantine)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS deletion_manifest (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
         original_path TEXT NOT NULL,
         quarantine_path TEXT NOT NULL,
         size INTEGER,
@@ -190,6 +256,103 @@ class DatabaseService {
         restored INTEGER DEFAULT 0
       )
     `);
+    
+    // Add user_id column to deletion_manifest if it doesn't exist
+    try {
+      const checkStmt = this.db.prepare("PRAGMA table_info(deletion_manifest)");
+      let hasUserId = false;
+      while (checkStmt.step()) {
+        const row = checkStmt.getAsObject();
+        if (row.name === 'user_id') {
+          hasUserId = true;
+          break;
+        }
+      }
+      checkStmt.free();
+      
+      if (!hasUserId) {
+        console.log('Migrating deletion_manifest table: adding user_id column');
+        this.db.exec(`ALTER TABLE deletion_manifest ADD COLUMN user_id TEXT`);
+      }
+    } catch (error) {
+      console.warn('Migration check for deletion_manifest table:', error.message);
+    }
+
+    // Deleted files tracking table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS deleted_files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        original_path TEXT NOT NULL,
+        trash_path TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        file_type TEXT,
+        size INTEGER,
+        is_directory INTEGER DEFAULT 0,
+        deleted_at INTEGER,
+        restored INTEGER DEFAULT 0,
+        restored_at INTEGER,
+        restored_path TEXT,
+        permanently_deleted INTEGER DEFAULT 0,
+        permanently_deleted_at INTEGER
+      )
+    `);
+    
+    // Add user_id column to deleted_files if it doesn't exist
+    try {
+      const checkStmt = this.db.prepare("PRAGMA table_info(deleted_files)");
+      let hasUserId = false;
+      while (checkStmt.step()) {
+        const row = checkStmt.getAsObject();
+        if (row.name === 'user_id') {
+          hasUserId = true;
+          break;
+        }
+      }
+      checkStmt.free();
+      
+      if (!hasUserId) {
+        console.log('Migrating deleted_files table: adding user_id column');
+        this.db.exec(`ALTER TABLE deleted_files ADD COLUMN user_id TEXT`);
+      }
+    } catch (error) {
+      console.warn('Migration check for deleted_files table:', error.message);
+    }
+
+    // Duplicate files scans table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS duplicate_scans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        total_scanned INTEGER,
+        duplicate_groups INTEGER,
+        total_duplicates INTEGER,
+        wasted_space INTEGER,
+        scan_results TEXT,
+        scanned_at INTEGER
+      )
+    `);
+    
+    // Add user_id column to duplicate_scans if it doesn't exist
+    try {
+      const checkStmt = this.db.prepare("PRAGMA table_info(duplicate_scans)");
+      let hasUserId = false;
+      while (checkStmt.step()) {
+        const row = checkStmt.getAsObject();
+        if (row.name === 'user_id') {
+          hasUserId = true;
+          break;
+        }
+      }
+      checkStmt.free();
+      
+      if (!hasUserId) {
+        console.log('Migrating duplicate_scans table: adding user_id column');
+        this.db.exec(`ALTER TABLE duplicate_scans ADD COLUMN user_id TEXT`);
+      }
+    } catch (error) {
+      console.warn('Migration check for duplicate_scans table:', error.message);
+    }
 
     // Create indexes for better performance
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_user_email ON user(email)`);
@@ -198,6 +361,13 @@ class DatabaseService {
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_user_id ON logs(user_id)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_backups_created ON backups(created_at)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_backups_user_id ON backups(user_id)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_deleted_files_date ON deleted_files(deleted_at)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_deleted_files_type ON deleted_files(file_type)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_deleted_files_user_id ON deleted_files(user_id)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_duplicate_scans_date ON duplicate_scans(scanned_at)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_duplicate_scans_user_id ON duplicate_scans(user_id)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_deletion_manifest_user_id ON deletion_manifest(user_id)`);
     
     // Create Firebase users cache table
     this.db.exec(`
@@ -252,6 +422,7 @@ class DatabaseService {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS app_usage_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
         app_name TEXT NOT NULL,
         app_command TEXT,
         pid INTEGER,
@@ -264,10 +435,32 @@ class DatabaseService {
       )
     `);
     
+    // Add user_id column to app_usage_history if it doesn't exist
+    try {
+      const checkStmt = this.db.prepare("PRAGMA table_info(app_usage_history)");
+      let hasUserId = false;
+      while (checkStmt.step()) {
+        const row = checkStmt.getAsObject();
+        if (row.name === 'user_id') {
+          hasUserId = true;
+          break;
+        }
+      }
+      checkStmt.free();
+      
+      if (!hasUserId) {
+        console.log('Migrating app_usage_history table: adding user_id column');
+        this.db.exec(`ALTER TABLE app_usage_history ADD COLUMN user_id TEXT`);
+      }
+    } catch (error) {
+      console.warn('Migration check for app_usage_history table:', error.message);
+    }
+    
     // Battery App Usage Sessions - tracks when apps start/stop
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS app_usage_sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
         session_id TEXT UNIQUE NOT NULL,
         app_name TEXT NOT NULL,
         app_command TEXT,
@@ -281,20 +474,44 @@ class DatabaseService {
         is_active INTEGER DEFAULT 1
       )
     `);
+    
+    // Add user_id column to app_usage_sessions if it doesn't exist
+    try {
+      const checkStmt = this.db.prepare("PRAGMA table_info(app_usage_sessions)");
+      let hasUserId = false;
+      while (checkStmt.step()) {
+        const row = checkStmt.getAsObject();
+        if (row.name === 'user_id') {
+          hasUserId = true;
+          break;
+        }
+      }
+      checkStmt.free();
+      
+      if (!hasUserId) {
+        console.log('Migrating app_usage_sessions table: adding user_id column');
+        this.db.exec(`ALTER TABLE app_usage_sessions ADD COLUMN user_id TEXT`);
+      }
+    } catch (error) {
+      console.warn('Migration check for app_usage_sessions table:', error.message);
+    }
 
     // Create indexes for better query performance
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_history_timestamp ON app_usage_history(timestamp)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_history_date_key ON app_usage_history(date_key)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_history_app_name ON app_usage_history(app_name)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_history_user_id ON app_usage_history(user_id)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_sessions_session_id ON app_usage_sessions(session_id)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_sessions_app_name ON app_usage_sessions(app_name)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_sessions_start_time ON app_usage_sessions(start_time)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_sessions_is_active ON app_usage_sessions(is_active)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_app_usage_sessions_user_id ON app_usage_sessions(user_id)`);
 
     // Create conversions table for file conversion tracking
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS conversions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
         input_path TEXT NOT NULL,
         output_path TEXT NOT NULL,
         input_format TEXT NOT NULL,
@@ -312,8 +529,30 @@ class DatabaseService {
       )
     `);
     
+    // Add user_id column to conversions if it doesn't exist
+    try {
+      const checkStmt = this.db.prepare("PRAGMA table_info(conversions)");
+      let hasUserId = false;
+      while (checkStmt.step()) {
+        const row = checkStmt.getAsObject();
+        if (row.name === 'user_id') {
+          hasUserId = true;
+          break;
+        }
+      }
+      checkStmt.free();
+      
+      if (!hasUserId) {
+        console.log('Migrating conversions table: adding user_id column');
+        this.db.exec(`ALTER TABLE conversions ADD COLUMN user_id TEXT`);
+      }
+    } catch (error) {
+      console.warn('Migration check for conversions table:', error.message);
+    }
+    
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_conversions_timestamp ON conversions(timestamp DESC)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_conversions_status ON conversions(status)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_conversions_user_id ON conversions(user_id)`);
     
     // Create app_settings table for persistent configuration
     this.db.exec(`
@@ -446,9 +685,31 @@ class DatabaseService {
       console.warn('Migration check for verification_tokens table:', error.message);
     }
     
+    // Add user_id column to verification_tokens if it doesn't exist
+    try {
+      const checkStmt = this.db.prepare("PRAGMA table_info(verification_tokens)");
+      let hasUserId = false;
+      while (checkStmt.step()) {
+        const row = checkStmt.getAsObject();
+        if (row.name === 'user_id') {
+          hasUserId = true;
+          break;
+        }
+      }
+      checkStmt.free();
+      
+      if (!hasUserId) {
+        console.log('Migrating verification_tokens table: adding user_id column');
+        this.db.exec(`ALTER TABLE verification_tokens ADD COLUMN user_id TEXT`);
+      }
+    } catch (error) {
+      console.warn('Migration check for verification_tokens user_id:', error.message);
+    }
+    
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_verification_tokens_resource ON verification_tokens(resource_id)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_verification_tokens_type ON verification_tokens(type)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_verification_tokens_expires ON verification_tokens(expires_at)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_verification_tokens_user_id ON verification_tokens(user_id)`);
     
     this.saveDatabase();
   }
@@ -905,27 +1166,35 @@ class DatabaseService {
    * @param {Boolean} options.deleteLogs - Whether to delete user's logs (default: true)
    * @param {Boolean} options.anonymizeLogs - Anonymize logs instead of deleting (default: false)
    */
+  /**
+   * COMPLETE USER DATA DELETION
+   * Removes ALL traces of the user from the database
+   * This ensures complete data isolation and privacy
+   */
   deleteUserData(uid, options = {}) {
     try {
-      const { deleteLogs = true, anonymizeLogs = false } = options;
+      console.log(`🗑️ COMPLETE DATA DELETION for UID: ${uid}`);
       
-      console.log(`🗑️ Deleting user data for UID: ${uid}`);
+      let deletedCount = 0;
+      let stmt;
       
-      // Delete from firebase_users_cache
-      let stmt = this.db.prepare('DELETE FROM firebase_users_cache WHERE uid = ?');
+      // 1. Delete from firebase_users_cache
+      stmt = this.db.prepare('DELETE FROM firebase_users_cache WHERE uid = ?');
       stmt.bind([uid]);
       stmt.step();
       stmt.free();
       console.log('  ✓ Deleted from firebase_users_cache');
+      deletedCount++;
       
-      // Delete from verification_codes
+      // 2. Delete from verification_codes
       stmt = this.db.prepare('DELETE FROM verification_codes WHERE uid = ?');
       stmt.bind([uid]);
       stmt.step();
       stmt.free();
       console.log('  ✓ Deleted from verification_codes');
+      deletedCount++;
       
-      // Delete from local user table (if exists)
+      // 3. Delete from local user table (if exists)
       const email = uid.startsWith('local_') ? this.getUserByLocalUid(uid)?.email : null;
       if (email) {
         stmt = this.db.prepare('DELETE FROM user WHERE email = ?');
@@ -933,36 +1202,105 @@ class DatabaseService {
         stmt.step();
         stmt.free();
         console.log('  ✓ Deleted from user table');
+        deletedCount++;
       }
       
-      // Handle user logs
-      if (deleteLogs) {
-        // Option 1: Delete all user's logs
-        stmt = this.db.prepare('DELETE FROM logs WHERE user_id = ?');
+      // 4. DELETE ALL USER LOGS - complete removal
+      stmt = this.db.prepare('DELETE FROM logs WHERE user_id = ?');
+      stmt.bind([uid]);
+      stmt.step();
+      stmt.free();
+      console.log('  ✓ DELETED ALL user logs');
+      deletedCount++;
+      
+      // 5. Delete user-specific settings
+      stmt = this.db.prepare('DELETE FROM settings WHERE user_id = ?');
+      stmt.bind([uid]);
+      stmt.step();
+      stmt.free();
+      console.log('  ✓ Deleted user settings');
+      deletedCount++;
+      
+      // 6. Delete user's backups
+      stmt = this.db.prepare('DELETE FROM backups WHERE user_id = ?');
+      stmt.bind([uid]);
+      stmt.step();
+      stmt.free();
+      console.log('  ✓ Deleted user backups');
+      deletedCount++;
+      
+      // 7. Delete user's verification tokens
+      stmt = this.db.prepare('DELETE FROM verification_tokens WHERE user_id = ?');
+      stmt.bind([uid]);
+      stmt.step();
+      stmt.free();
+      console.log('  ✓ Deleted user verification tokens');
+      deletedCount++;
+      
+      // 8. Delete user's deleted files records
+      stmt = this.db.prepare('DELETE FROM deleted_files WHERE user_id = ?');
+      stmt.bind([uid]);
+      stmt.step();
+      stmt.free();
+      console.log('  ✓ Deleted user deleted files records');
+      deletedCount++;
+      
+      // 9. Delete user's duplicate scan results
+      stmt = this.db.prepare('DELETE FROM duplicate_scans WHERE user_id = ?');
+      stmt.bind([uid]);
+      stmt.step();
+      stmt.free();
+      console.log('  ✓ Deleted user duplicate scan results');
+      deletedCount++;
+      
+      // 10. Delete user's conversions
+      stmt = this.db.prepare('DELETE FROM conversions WHERE user_id = ?');
+      stmt.bind([uid]);
+      stmt.step();
+      stmt.free();
+      console.log('  ✓ Deleted user conversions');
+      deletedCount++;
+      
+      // 11. Delete user's quarantine items (if table exists)
+      try {
+        stmt = this.db.prepare('DELETE FROM quarantine WHERE user_id = ?');
         stmt.bind([uid]);
         stmt.step();
         stmt.free();
-        console.log('  ✓ Deleted user logs');
-      } else if (anonymizeLogs) {
-        // Option 2: Anonymize logs (recommended for audit trail)
-        stmt = this.db.prepare('UPDATE logs SET user_id = NULL, metadata = NULL WHERE user_id = ?');
-        stmt.bind([uid]);
-        stmt.step();
-        stmt.free();
-        console.log('  ✓ Anonymized user logs (converted to system logs)');
+        console.log('  ✓ Deleted user quarantine items');
+        deletedCount++;
+      } catch (e) {
+        if (!e.message.includes('no such table')) throw e;
       }
-      // Option 3: Keep logs as-is (do nothing)
+      
+      // 12. Delete user's app usage history
+      stmt = this.db.prepare('DELETE FROM app_usage_history WHERE user_id = ?');
+      stmt.bind([uid]);
+      stmt.step();
+      stmt.free();
+      console.log('  ✓ Deleted user app usage history');
+      deletedCount++;
+      
+      // 13. Delete user's app usage sessions
+      stmt = this.db.prepare('DELETE FROM app_usage_sessions WHERE user_id = ?');
+      stmt.bind([uid]);
+      stmt.step();
+      stmt.free();
+      console.log('  ✓ Deleted user app usage sessions');
+      deletedCount++;
       
       this.saveDatabase();
       
+      console.log(`🎯 COMPLETE DELETION SUCCESS: Removed ${deletedCount} data categories for user ${uid}`);
+      
       return { 
         success: true, 
-        message: 'User data deleted successfully',
-        deletedLogs: deleteLogs,
-        anonymizedLogs: anonymizeLogs && !deleteLogs
+        message: 'All user data completely deleted',
+        deletedCount,
+        uid
       };
     } catch (error) {
-      console.error('Error deleting user data:', error);
+      console.error('❌ Error deleting user data:', error);
       return { success: false, error: error.message };
     }
   }
@@ -982,10 +1320,23 @@ class DatabaseService {
 
   /**
    * Settings CRUD operations
+   * Settings are now user-specific for proper data isolation
    */
-  getSetting(key) {
-    const stmt = this.db.prepare('SELECT value FROM settings WHERE key = ?');
-    stmt.bind([key]);
+  getSetting(key, userId = null) {
+    let query = 'SELECT value FROM settings WHERE key = ?';
+    const params = [key];
+    
+    // USER ISOLATION: Get setting for specific user or global (NULL)
+    if (userId) {
+      query += ' AND (user_id = ? OR user_id IS NULL)';
+      params.push(userId);
+      query += ' ORDER BY user_id DESC LIMIT 1'; // Prioritize user-specific over global
+    } else {
+      query += ' AND user_id IS NULL'; // Only global settings when not logged in
+    }
+    
+    const stmt = this.db.prepare(query);
+    stmt.bind(params);
     if (stmt.step()) {
       const row = stmt.getAsObject();
       stmt.free();
@@ -995,23 +1346,36 @@ class DatabaseService {
     return null;
   }
 
-  setSetting(key, value) {
-    // First try to update, if no rows affected, then insert
-    const selectStmt = this.db.prepare('SELECT key FROM settings WHERE key = ?');
-    selectStmt.bind([key]);
+  setSetting(key, value, userId = null) {
+    // USER ISOLATION: Check if user-specific setting exists
+    let selectQuery = 'SELECT id FROM settings WHERE key = ?';
+    const selectParams = [key];
+    
+    if (userId) {
+      selectQuery += ' AND user_id = ?';
+      selectParams.push(userId);
+    } else {
+      selectQuery += ' AND user_id IS NULL';
+    }
+    
+    const selectStmt = this.db.prepare(selectQuery);
+    selectStmt.bind(selectParams);
     const exists = selectStmt.step();
+    const existingId = exists ? selectStmt.getAsObject().id : null;
     selectStmt.free();
 
-    if (exists) {
+    if (exists && existingId) {
+      // Update existing setting
       const updateStmt = this.db.prepare(
-        'UPDATE settings SET value = ?, updated_at = strftime("%s", "now") WHERE key = ?'
+        'UPDATE settings SET value = ?, updated_at = strftime("%s", "now") WHERE id = ?'
       );
-      updateStmt.bind([value, key]);
+      updateStmt.bind([value, existingId]);
       updateStmt.step();
       updateStmt.free();
     } else {
-      const insertStmt = this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
-      insertStmt.bind([key, value]);
+      // Insert new setting
+      const insertStmt = this.db.prepare('INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?)');
+      insertStmt.bind([userId, key, value]);
       insertStmt.step();
       insertStmt.free();
     }
@@ -1021,9 +1385,18 @@ class DatabaseService {
   }
 
   /**
-   * Logs operations
+   * Add log entry - REQUIRES user_id for complete data isolation
+   * Logs without a user_id will be REJECTED to ensure complete user data isolation
+   * Each user must have their own isolated logs from the moment they create their account
    */
   addLog(type, message, metadata = null, level = 'info', userId = null) {
+    // STRICT ENFORCEMENT: Reject logs without user_id
+    if (!userId) {
+      // Silently skip - don't log errors to avoid infinite loops
+      // This ensures no "orphan" logs exist in the database
+      return { success: false, reason: 'No user_id provided - log rejected for data isolation' };
+    }
+    
     const stmt = this.db.prepare(
       'INSERT INTO logs (type, level, message, metadata, user_id) VALUES (?, ?, ?, ?, ?)'
     );
@@ -1037,7 +1410,7 @@ class DatabaseService {
   /**
    * Verification Token operations
    */
-  addVerificationToken(tokenId, type, resourceId, resourceName, systemId, issuedAt, expiresAt, ttl, oneTimeUse, metadata, signature, filePath = null, fileHash = null) {
+  addVerificationToken(tokenId, type, resourceId, resourceName, systemId, issuedAt, expiresAt, ttl, oneTimeUse, metadata, signature, filePath = null, fileHash = null, userId = null) {
     let stmt = null;
     try {
       console.log('[Database] Adding verification token with RAW inputs:', {
@@ -1048,7 +1421,8 @@ class DatabaseService {
         ttl: typeof ttl + ' = ' + ttl,
         isPermanent: ttl === null,
         expiresAtIsNull: expiresAt === null,
-        oneTimeUse: typeof oneTimeUse + ' = ' + oneTimeUse
+        oneTimeUse: typeof oneTimeUse + ' = ' + oneTimeUse,
+        userId: userId
       });
 
       // Ensure database is initialized
@@ -1091,15 +1465,16 @@ class DatabaseService {
         metadataStr,                          // 11: metadata
         signature,                            // 12: signature
         filePath || null,                     // 13: file_path (can be NULL)
-        fileHash || null                      // 14: file_hash (can be NULL)
+        fileHash || null,                     // 14: file_hash (can be NULL)
+        userId || null                        // 15: user_id (can be NULL)
       ];
 
       console.log('[Database] Bind parameters TYPES:', bindParams.map((p, i) => `${i + 1}: ${p === null ? 'NULL' : typeof p + ' = ' + p}`));
 
       stmt = this.db.prepare(
         `INSERT INTO verification_tokens 
-         (token_id, type, resource_id, resource_name, system_id, issued_at, expires_at, ttl, one_time_use, used, metadata, signature, file_path, file_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         (token_id, type, resource_id, resource_name, system_id, issued_at, expires_at, ttl, one_time_use, used, metadata, signature, file_path, file_hash, user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
 
       // Replace any undefined with null to satisfy SQL.js binding
@@ -1199,6 +1574,15 @@ class DatabaseService {
       let query = 'SELECT * FROM verification_tokens WHERE 1=1';
       const params = [];
 
+      // Filter by userId - ONLY show user's tokens (no system tokens for verification)
+      if (filters.userId) {
+        query += ' AND user_id = ?';
+        params.push(filters.userId);
+      } else {
+        // If no userId provided, don't return any tokens (security)
+        query += ' AND 0 = 1';
+      }
+
       if (filters.type) {
         query += ' AND type = ?';
         params.push(filters.type);
@@ -1254,12 +1638,25 @@ class DatabaseService {
     }
   }
 
-  getLogs(type = null, limit = 100) {
-    let query = 'SELECT * FROM logs';
+  /**
+   * Get logs with optional type filtering
+   * USER ISOLATION: Returns ONLY user's logs (no system logs to prevent data leakage)
+   */
+  getLogs(type = null, limit = 100, userId = null) {
+    let query = 'SELECT * FROM logs WHERE 1=1';
     const params = [];
 
+    // USER ISOLATION - ONLY show user's logs
+    if (userId) {
+      query += ' AND user_id = ?';
+      params.push(userId);
+    } else {
+      // If no userId, return empty (security)
+      query += ' AND 0 = 1';
+    }
+
     if (type) {
-      query += ' WHERE type = ?';
+      query += ' AND type = ?';
       params.push(type);
     }
 
@@ -1315,10 +1712,14 @@ class DatabaseService {
     let query = 'SELECT * FROM logs WHERE 1=1';
     const params = [];
 
-    // User filter - show user's logs + system logs
+    // STRICT USER ISOLATION: Show ONLY the user's own logs
+    // No sharing of logs between users - complete data isolation
     if (filters.userId) {
-      query += ' AND (user_id = ? OR user_id IS NULL)';
+      query += ' AND user_id = ?';
       params.push(filters.userId);
+    } else {
+      // No user logged in - return empty results for security
+      query += ' AND 1 = 0';
     }
 
     // Level filter
@@ -1383,11 +1784,21 @@ class DatabaseService {
   }
 
   /**
-   * Get unique log types/modules
+   * Get unique log types/modules for CURRENT USER ONLY
+   * STRICT USER ISOLATION: Only returns log types from the user's own logs
+   * Each user has their own isolated log types based on their activities
    */
-  getLogTypes() {
-    const query = 'SELECT DISTINCT type FROM logs ORDER BY type';
+  getLogTypes(userId = null) {
+    if (!userId) {
+      // No user logged in - return empty array
+      return [];
+    }
+    
+    // Return ONLY the user's log types for strict isolation
+    const query = 'SELECT DISTINCT type FROM logs WHERE user_id = ? ORDER BY type';
+    
     const stmt = this.db.prepare(query);
+    stmt.bind([userId]);
     const results = [];
     while (stmt.step()) {
       results.push(stmt.getAsObject().type);
@@ -1415,11 +1826,21 @@ class DatabaseService {
 
   /**
    * Export logs to structured format
+   * STRICT USER ISOLATION: Only exports the user's own logs
    * @param {Object} filters - Same as getLogsFiltered
    */
   exportLogs(filters = {}) {
     let query = 'SELECT * FROM logs WHERE 1=1';
     const params = [];
+
+    // STRICT USER ISOLATION: Only export user's own logs
+    if (filters.userId) {
+      query += ' AND user_id = ?';
+      params.push(filters.userId);
+    } else {
+      // No user logged in - return empty for security
+      query += ' AND 1 = 0';
+    }
 
     if (filters.level && filters.level !== 'all') {
       query += ' AND level = ?';
@@ -1461,45 +1882,104 @@ class DatabaseService {
   /**
    * Backup operations
    */
-  createBackup(data) {
-    const stmt = this.db.prepare(
-      'INSERT INTO backups (name, source_path, backup_path, size, file_count, encrypted, manifest) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    );
-    stmt.bind([
-      data.name,
-      data.source_path || data.sourcePath,
-      data.backup_path || data.backupPath,
-      data.size,
-      data.file_count || data.fileCount,
-      data.encrypted ? 1 : 0,
-      data.manifest
-    ]);
-    stmt.step();
-    stmt.free();
-    this.saveDatabase();
-    return { success: true };
+  
+  /**
+   * Add a new backup record to database
+   * @param {Object} data - Backup data (name, source_path, backup_path, size, file_count, encrypted, manifest)
+   * @param {String} userId - User ID who created the backup
+   */
+  addBackup(data, userId = null) {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO backups (user_id, name, source_path, backup_path, size, file_count, encrypted, manifest)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      
+      stmt.bind([
+        userId,
+        data.name,
+        data.source_path,
+        data.backup_path,
+        data.size || 0,
+        data.file_count || 0,
+        data.encrypted || 0,
+        data.manifest || null
+      ]);
+      
+      stmt.step();
+      const lastId = this.db.exec('SELECT last_insert_rowid() as id')[0].values[0][0];
+      stmt.free();
+      this.saveDatabase();
+      
+      return { success: true, id: lastId };
+    } catch (error) {
+      console.error('Failed to add backup:', error);
+      return { success: false, error: error.message };
+    }
   }
 
-  getBackups(filters = {}, limit = 50) {
-    let query = 'SELECT * FROM backups';
-    const params = [];
-    
-    if (filters.source_path) {
-      query += ' WHERE source_path = ?';
-      params.push(filters.source_path);
+  /**
+   * Get backups with filtering and pagination
+   * @param {Object} filters - Filter options
+   * @param {Number} limit - Maximum number of results
+   * @param {String} userId - User ID to filter by
+   */
+  getBackups(filters = {}, limit = 50, userId = null) {
+    try {
+      let query = 'SELECT * FROM backups';
+      const params = [];
+      const conditions = [];
+      
+      // USER ISOLATION: Only show user's backups
+      if (userId) {
+        conditions.push('user_id = ?');
+        params.push(userId);
+      } else {
+        // Not logged in - show only NULL user_id (legacy data)
+        conditions.push('user_id IS NULL');
+      }
+      
+      // Add name filter if provided
+      if (filters.name) {
+        conditions.push('name LIKE ?');
+        params.push(`%${filters.name}%`);
+      }
+      
+      // Add encrypted filter if provided
+      if (filters.encrypted !== undefined) {
+        conditions.push('encrypted = ?');
+        params.push(filters.encrypted ? 1 : 0);
+      }
+      
+      // Add WHERE clause if there are conditions
+      if (conditions.length > 0) {
+        query += ' WHERE ' + conditions.join(' AND ');
+      }
+      
+      query += ' ORDER BY created_at DESC LIMIT ?';
+      params.push(limit);
+      
+      const stmt = this.db.prepare(query);
+      stmt.bind(params);
+      
+      const results = [];
+      while (stmt.step()) {
+        results.push(stmt.getAsObject());
+      }
+      stmt.free();
+      
+      return results;
+    } catch (error) {
+      console.error('Failed to get backups:', error);
+      return [];
     }
-    
-    query += ' ORDER BY created_at DESC LIMIT ?';
-    params.push(limit);
-    
-    const stmt = this.db.prepare(query);
-    stmt.bind(params);
-    const results = [];
-    while (stmt.step()) {
-      results.push(stmt.getAsObject());
-    }
-    stmt.free();
-    return results;
+  }
+
+  /**
+   * Alias for addBackup for backward compatibility
+   */
+  createBackup(data, userId = null) {
+    return this.addBackup(data, userId);
   }
 
   getBackupById(id) {
@@ -1526,22 +2006,31 @@ class DatabaseService {
   /**
    * Deletion manifest operations
    */
-  addToQuarantine(originalPath, quarantinePath, size) {
+  addToQuarantine(originalPath, quarantinePath, size, userId = null) {
     const stmt = this.db.prepare(
-      'INSERT INTO deletion_manifest (original_path, quarantine_path, size) VALUES (?, ?, ?)'
+      'INSERT INTO deletion_manifest (user_id, original_path, quarantine_path, size) VALUES (?, ?, ?, ?)'
     );
-    stmt.bind([originalPath, quarantinePath, size]);
+    stmt.bind([userId, originalPath, quarantinePath, size]);
     stmt.step();
     stmt.free();
     this.saveDatabase();
     return { success: true };
   }
 
-  getQuarantinedFiles(limit = 100) {
-    const stmt = this.db.prepare(
-      'SELECT * FROM deletion_manifest WHERE restored = 0 ORDER BY deleted_at DESC LIMIT ?'
-    );
-    stmt.bind([limit]);
+  getQuarantinedFiles(limit = 100, userId = null) {
+    let query = 'SELECT * FROM deletion_manifest WHERE restored = 0';
+    const params = [];
+    
+    if (userId) {
+      query += ' AND user_id = ?';
+      params.push(userId);
+    }
+    
+    query += ' ORDER BY deleted_at DESC LIMIT ?';
+    params.push(limit);
+    
+    const stmt = this.db.prepare(query);
+    stmt.bind(params);
     const results = [];
     while (stmt.step()) {
       results.push(stmt.getAsObject());
@@ -1562,16 +2051,17 @@ class DatabaseService {
   /**
    * Conversion operations
    */
-  logConversion(data) {
+  logConversion(data, userId = null) {
     const stmt = this.db.prepare(`
       INSERT INTO conversions (
-        input_path, output_path, input_format, output_format, 
+        user_id, input_path, output_path, input_format, output_format, 
         input_size, output_size, hash_before, hash_after, 
         encrypted, compressed, duration, status, error, timestamp
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     
     stmt.bind([
+      userId,
       data.input_path,
       data.output_path,
       data.input_format,
@@ -1595,13 +2085,20 @@ class DatabaseService {
     return { success: true, id: lastId };
   }
 
-  getConversions(limit = 50) {
-    const stmt = this.db.prepare(`
-      SELECT * FROM conversions 
-      ORDER BY timestamp DESC 
-      LIMIT ?
-    `);
-    stmt.bind([limit]);
+  getConversions(limit = 50, userId = null) {
+    let query = 'SELECT * FROM conversions';
+    const params = [];
+    
+    if (userId) {
+      query += ' WHERE user_id = ?';
+      params.push(userId);
+    }
+    
+    query += ' ORDER BY timestamp DESC LIMIT ?';
+    params.push(limit);
+    
+    const stmt = this.db.prepare(query);
+    stmt.bind(params);
     const results = [];
     while (stmt.step()) {
       results.push(stmt.getAsObject());
@@ -1622,8 +2119,8 @@ class DatabaseService {
     return null;
   }
 
-  getConversionStats() {
-    const stmt = this.db.prepare(`
+  getConversionStats(userId = null) {
+    let query = `
       SELECT 
         COUNT(*) as total,
         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
@@ -1631,7 +2128,16 @@ class DatabaseService {
         SUM(input_size) as total_input_size,
         SUM(output_size) as total_output_size
       FROM conversions
-    `);
+    `;
+    
+    const params = [];
+    if (userId) {
+      query += ' WHERE user_id = ?';
+      params.push(userId);
+    }
+    
+    const stmt = this.db.prepare(query);
+    stmt.bind(params);
     
     if (stmt.step()) {
       const row = stmt.getAsObject();
@@ -1655,11 +2161,20 @@ class DatabaseService {
    * Get all backups for resource selection
    * @returns {Array} List of backups with id, name, size, created_at
    */
-  getBackupsForSelection() {
+  getBackupsForSelection(userId = null) {
     try {
-      const stmt = this.db.prepare(
-        'SELECT id, name, source_path, backup_path, size, file_count, encrypted, created_at FROM backups ORDER BY created_at DESC'
-      );
+      let query = 'SELECT id, name, source_path, backup_path, size, file_count, encrypted, created_at FROM backups';
+      const params = [];
+      
+      if (userId) {
+        query += ' WHERE user_id = ?';
+        params.push(userId);
+      }
+      
+      query += ' ORDER BY created_at DESC';
+      
+      const stmt = this.db.prepare(query);
+      stmt.bind(params);
       const results = [];
       while (stmt.step()) {
         results.push(stmt.getAsObject());
@@ -1674,18 +2189,29 @@ class DatabaseService {
 
   /**
    * Get conversion history for resource selection
+   * @param {String} userId - Optional user ID to filter conversions
    * @returns {Array} List of converted files
    */
-  getConversionHistoryForSelection() {
+  getConversionHistoryForSelection(userId = null) {
     try {
-      const stmt = this.db.prepare(
-        `SELECT id, input_path, output_path, input_format, output_format, 
+      let query = `SELECT id, input_path, output_path, input_format, output_format, 
          input_size, output_size, hash_after, timestamp, status 
          FROM conversions 
-         WHERE status = 'completed'
-         ORDER BY timestamp DESC 
-         LIMIT 100`
-      );
+         WHERE status = 'completed'`;
+      
+      const params = [];
+      if (userId) {
+        query += ' AND user_id = ?';
+        params.push(userId);
+      }
+      
+      query += ' ORDER BY timestamp DESC LIMIT 100';
+      
+      const stmt = this.db.prepare(query);
+      if (params.length > 0) {
+        stmt.bind(params);
+      }
+      
       const results = [];
       while (stmt.step()) {
         results.push(stmt.getAsObject());
@@ -1701,17 +2227,31 @@ class DatabaseService {
   /**
    * Get diagnostic reports for resource selection
    * NOTE: Diagnostic reports are stored as logs. This fetches diagnostic-type logs.
+   * @param {String} userId - Optional user ID to filter reports
    * @returns {Array} List of diagnostic reports
    */
-  getDiagnosticReportsForSelection() {
+  getDiagnosticReportsForSelection(userId = null) {
     try {
-      const stmt = this.db.prepare(
-        `SELECT id, type, message, metadata, timestamp 
+      let query = `SELECT id, type, message, metadata, timestamp 
          FROM logs 
-         WHERE type LIKE '%diagnostic%' OR type LIKE '%system%' OR type LIKE '%health%'
-         ORDER BY timestamp DESC 
-         LIMIT 50`
-      );
+         WHERE (type LIKE '%diagnostic%' OR type LIKE '%system%' OR type LIKE '%health%')`;
+      
+      const params = [];
+      if (userId) {
+        query += ' AND user_id = ?';
+        params.push(userId);
+      } else {
+        // No userId - return empty
+        query += ' AND 0 = 1';
+      }
+      
+      query += ' ORDER BY timestamp DESC LIMIT 50';
+      
+      const stmt = this.db.prepare(query);
+      if (params.length > 0) {
+        stmt.bind(params);
+      }
+      
       const results = [];
       while (stmt.step()) {
         results.push(stmt.getAsObject());
@@ -1731,17 +2271,17 @@ class DatabaseService {
   /**
    * Record app usage snapshot for battery tracking
    */
-  recordAppUsage(appName, appCommand, pid, sessionId, cpuPercent, memoryPercent, batteryImpact) {
+  recordAppUsage(appName, appCommand, pid, sessionId, cpuPercent, memoryPercent, batteryImpact, userId = null) {
     try {
       const now = Date.now();
       const dateKey = new Date(now).toISOString().split('T')[0]; // YYYY-MM-DD format
       
       const stmt = this.db.prepare(
         `INSERT INTO app_usage_history 
-        (app_name, app_command, pid, session_id, cpu_percent, memory_percent, battery_impact, timestamp, date_key) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (user_id, app_name, app_command, pid, session_id, cpu_percent, memory_percent, battery_impact, timestamp, date_key) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
-      stmt.run([appName, appCommand, pid, sessionId, cpuPercent, memoryPercent, batteryImpact, Math.floor(now / 1000), dateKey]);
+      stmt.run([userId, appName, appCommand, pid, sessionId, cpuPercent, memoryPercent, batteryImpact, Math.floor(now / 1000), dateKey]);
       stmt.free();
       
       this.saveDatabase();
@@ -1755,16 +2295,16 @@ class DatabaseService {
   /**
    * Start a new app usage session
    */
-  startAppSession(sessionId, appName, appCommand, pid) {
+  startAppSession(sessionId, appName, appCommand, pid, userId = null) {
     try {
       const now = Math.floor(Date.now() / 1000);
       
       const stmt = this.db.prepare(
         `INSERT INTO app_usage_sessions 
-        (session_id, app_name, app_command, pid, start_time, is_active) 
-        VALUES (?, ?, ?, ?, ?, 1)`
+        (user_id, session_id, app_name, app_command, pid, start_time, is_active) 
+        VALUES (?, ?, ?, ?, ?, ?, 1)`
       );
-      stmt.run([sessionId, appName, appCommand, pid, now]);
+      stmt.run([userId, sessionId, appName, appCommand, pid, now]);
       stmt.free();
       
       this.saveDatabase();
@@ -1825,43 +2365,50 @@ class DatabaseService {
   /**
    * Get historical app usage for a timeframe
    * @param {string} timeframe - 'today', 'yesterday', 'last_week', 'last_month'
+   * @param {string} userId - User ID for filtering
    * @returns {Array} App usage data grouped by app
    */
-  getHistoricalAppUsage(timeframe) {
+  getHistoricalAppUsage(timeframe, userId = null) {
     try {
       const now = new Date();
       let startTime, endTime;
       
       switch (timeframe) {
         case 'today':
-          // Today: from midnight today to now
+          // TODAY: From midnight today to RIGHT NOW
           const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
           startTime = Math.floor(todayStart.getTime() / 1000);
           endTime = Math.floor(Date.now() / 1000);
+          console.log(`[Timeframe: TODAY] ${todayStart.toLocaleString()} to NOW`);
           break;
           
         case 'yesterday':
-          // Yesterday: from midnight yesterday to midnight today
+          // YESTERDAY: From midnight yesterday to midnight today (EXCLUDES today)
           const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0);
           const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
           startTime = Math.floor(yesterdayStart.getTime() / 1000);
           endTime = Math.floor(yesterdayEnd.getTime() / 1000);
+          console.log(`[Timeframe: YESTERDAY] ${yesterdayStart.toLocaleString()} to ${yesterdayEnd.toLocaleString()}`);
           break;
           
         case 'last_week':
-          // Last 7 days: from 7 days ago midnight to yesterday midnight (excluding today)
+          // LAST WEEK: From 7 days ago midnight to YESTERDAY END (EXCLUDES today)
+          // This shows the past 7 days NOT including current day
           const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7, 0, 0, 0);
-          const weekEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          const weekEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0); // Midnight today
           startTime = Math.floor(weekStart.getTime() / 1000);
           endTime = Math.floor(weekEnd.getTime() / 1000);
+          console.log(`[Timeframe: LAST WEEK] ${weekStart.toLocaleString()} to ${weekEnd.toLocaleString()} (7 days, excludes today)`);
           break;
           
         case 'last_month':
-          // Last 30 days: from 30 days ago midnight to yesterday midnight (excluding today)
+          // LAST MONTH: From 30 days ago midnight to YESTERDAY END (EXCLUDES today)
+          // This shows the past 30 days NOT including current day
           const monthStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30, 0, 0, 0);
-          const monthEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          const monthEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0); // Midnight today
           startTime = Math.floor(monthStart.getTime() / 1000);
           endTime = Math.floor(monthEnd.getTime() / 1000);
+          console.log(`[Timeframe: LAST MONTH] ${monthStart.toLocaleString()} to ${monthEnd.toLocaleString()} (30 days, excludes today)`);
           break;
           
         default:
@@ -1869,9 +2416,10 @@ class DatabaseService {
           const defaultStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
           startTime = Math.floor(defaultStart.getTime() / 1000);
           endTime = Math.floor(Date.now() / 1000);
+          console.log(`[Timeframe: DEFAULT/TODAY] ${defaultStart.toLocaleString()} to NOW`);
       }
       
-      return this.getHistoricalAppUsageRange(startTime, endTime);
+      return this.getHistoricalAppUsageRange(startTime, endTime, userId);
     } catch (error) {
       console.error('Failed to get historical app usage:', error);
       return [];
@@ -1881,14 +2429,13 @@ class DatabaseService {
   /**
    * Get historical app usage for a specific time range
    */
-  getHistoricalAppUsageRange(startTime, endTime) {
+  getHistoricalAppUsageRange(startTime, endTime, userId = null) {
     try {
       const startDate = new Date(startTime * 1000);
       const endDate = new Date(endTime * 1000);
       console.log(`[DB Query] getHistoricalAppUsageRange: ${startDate.toLocaleString()} to ${endDate.toLocaleString()}`);
       
-      const stmt = this.db.prepare(
-        `SELECT 
+      let query = `SELECT 
           app_name,
           app_command,
           COUNT(*) as samples,
@@ -1897,12 +2444,25 @@ class DatabaseService {
           SUM(battery_impact) as total_battery_impact,
           MAX(battery_impact) as peak_battery_impact
         FROM app_usage_history
-        WHERE timestamp >= ? AND timestamp < ?
-        GROUP BY app_name
-        ORDER BY total_battery_impact DESC
-        LIMIT 20`
-      );
-      stmt.bind([startTime, endTime]);
+        WHERE timestamp >= ? AND timestamp < ?`;
+      
+      const params = [startTime, endTime];
+      
+      // USER ISOLATION: Show ONLY user's data (no shared data)
+      if (userId) {
+        query += ' AND user_id = ?';
+        params.push(userId);
+      } else {
+        // Not logged in - return empty
+        query += ' AND 0 = 1';
+      }
+      
+      query += ` GROUP BY app_name
+        ORDER BY total_battery_impact DESC`;
+      // No LIMIT - return all tracked apps for accurate display
+      
+      const stmt = this.db.prepare(query);
+      stmt.bind(params);
       
       const results = [];
       while (stmt.step()) {
@@ -1910,7 +2470,30 @@ class DatabaseService {
       }
       stmt.free();
       
-      console.log(`[DB Query] Found ${results.length} apps in this range`);
+      console.log(`[DB Query] Found ${results.length} apps for ${new Date(startTime * 1000).toLocaleString()} to ${new Date(endTime * 1000).toLocaleString()}`);
+      
+      // Debug: Log total rows and date range in table
+      if (results.length === 0) {
+        const countStmt = this.db.prepare('SELECT COUNT(*) as total FROM app_usage_history');
+        if (countStmt.step()) {
+          const total = countStmt.getAsObject().total;
+          console.log(`[DB Query] ⚠️ No apps in range, but database has ${total} total records`);
+        }
+        countStmt.free();
+        
+        // Check date range of existing data
+        const rangeStmt = this.db.prepare('SELECT MIN(timestamp) as min_time, MAX(timestamp) as max_time FROM app_usage_history');
+        if (rangeStmt.step()) {
+          const range = rangeStmt.getAsObject();
+          if (range.min_time && range.max_time) {
+            console.log(`[DB Query] Database data range: ${new Date(range.min_time * 1000).toLocaleString()} to ${new Date(range.max_time * 1000).toLocaleString()}`);
+          }
+        }
+        rangeStmt.free();
+      } else if (results.length > 0) {
+        // Log first few results for debugging
+        console.log(`[DB Query] Top 3 apps: ${results.slice(0, 3).map(r => `${r.app_name}(impact:${Math.round(r.total_battery_impact)})`).join(', ')}`);
+      }
       
       return results;
     } catch (error) {
@@ -1921,22 +2504,24 @@ class DatabaseService {
 
   /**
    * Get total battery impact for a timeframe (for percentage calculations)
+   * @param {string} timeframe - 'today', 'yesterday', 'last_week', 'last_month'
+   * @param {number} userId - Optional user ID for filtering
    */
-  getTotalBatteryImpact(timeframe) {
+  getTotalBatteryImpact(timeframe, userId = null) {
     try {
       const now = new Date();
       let startTime, endTime;
       
       switch (timeframe) {
         case 'today':
-          // Today: from midnight today to now
+          // TODAY: From midnight today to RIGHT NOW
           const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
           startTime = Math.floor(todayStart.getTime() / 1000);
           endTime = Math.floor(Date.now() / 1000);
           break;
           
         case 'yesterday':
-          // Yesterday: from midnight yesterday to midnight today
+          // YESTERDAY: From midnight yesterday to midnight today (EXCLUDES today)
           const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0);
           const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
           startTime = Math.floor(yesterdayStart.getTime() / 1000);
@@ -1944,7 +2529,7 @@ class DatabaseService {
           break;
           
         case 'last_week':
-          // Last 7 days: from 7 days ago midnight to yesterday midnight (excluding today)
+          // LAST WEEK: From 7 days ago to YESTERDAY END (EXCLUDES today)
           const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7, 0, 0, 0);
           const weekEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
           startTime = Math.floor(weekStart.getTime() / 1000);
@@ -1952,7 +2537,7 @@ class DatabaseService {
           break;
           
         case 'last_month':
-          // Last 30 days: from 30 days ago midnight to yesterday midnight (excluding today)
+          // LAST MONTH: From 30 days ago to YESTERDAY END (EXCLUDES today)
           const monthStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30, 0, 0, 0);
           const monthEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
           startTime = Math.floor(monthStart.getTime() / 1000);
@@ -1966,7 +2551,7 @@ class DatabaseService {
           endTime = Math.floor(Date.now() / 1000);
       }
       
-      return this.getTotalBatteryImpactRange(startTime, endTime);
+      return this.getTotalBatteryImpactRange(startTime, endTime, userId);
     } catch (error) {
       console.error('Failed to get total battery impact:', error);
       return 0;
@@ -1975,15 +2560,29 @@ class DatabaseService {
 
   /**
    * Get total battery impact for a specific time range
+   * @param {number} startTime - Start timestamp in seconds
+   * @param {number} endTime - End timestamp in seconds
+   * @param {number} userId - Optional user ID for filtering
    */
-  getTotalBatteryImpactRange(startTime, endTime) {
+  getTotalBatteryImpactRange(startTime, endTime, userId = null) {
     try {
-      const stmt = this.db.prepare(
-        `SELECT SUM(battery_impact) as total 
+      let query = `SELECT SUM(battery_impact) as total 
         FROM app_usage_history 
-        WHERE timestamp >= ? AND timestamp < ?`
-      );
-      stmt.bind([startTime, endTime]);
+        WHERE timestamp >= ? AND timestamp < ?`;
+      
+      const params = [startTime, endTime];
+      
+      // USER ISOLATION: Only count impact from user's own processes
+      if (userId) {
+        query += ' AND user_id = ?';
+        params.push(userId);
+      } else {
+        // Not logged in - return 0
+        query += ' AND 0 = 1';
+      }
+      
+      const stmt = this.db.prepare(query);
+      stmt.bind(params);
       
       let total = 0;
       if (stmt.step()) {
@@ -2030,13 +2629,26 @@ class DatabaseService {
   }
 
   /**
-   * Get active app sessions count
+   * Get active app sessions count (all timeframes)
+   * @param {string} userId - Optional user ID for filtering
    */
-  getActiveSessionsCount() {
+  getActiveSessionsCount(userId = null) {
     try {
-      const stmt = this.db.prepare(
-        'SELECT COUNT(*) as count FROM app_usage_sessions WHERE is_active = 1'
-      );
+      let query = 'SELECT COUNT(*) as count FROM app_usage_sessions WHERE is_active = 1';
+      const params = [];
+      
+      if (userId) {
+        query += ' AND user_id = ?';
+        params.push(userId);
+      } else {
+        // Not logged in - return 0
+        query += ' AND 0 = 1';
+      }
+      
+      const stmt = this.db.prepare(query);
+      if (params.length > 0) {
+        stmt.bind(params);
+      }
       
       let count = 0;
       if (stmt.step()) {
@@ -2048,6 +2660,83 @@ class DatabaseService {
       return count;
     } catch (error) {
       console.error('Failed to get active sessions count:', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Get session count for specific timeframe
+   * @param {string} timeframe - 'today', 'yesterday', 'last_week', 'last_month'
+   * @param {string} userId - Optional user ID for filtering
+   * @returns {number} Count of sessions in timeframe
+   */
+  getActiveSessionsCountForTimeframe(timeframe, userId = null) {
+    try {
+      const now = new Date();
+      let startTime, endTime;
+      
+      switch (timeframe) {
+        case 'today':
+          // TODAY: From midnight today to RIGHT NOW
+          const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(todayStart.getTime() / 1000);
+          endTime = Math.floor(Date.now() / 1000);
+          break;
+          
+        case 'yesterday':
+          // YESTERDAY: From midnight yesterday to midnight today (EXCLUDES today)
+          const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0);
+          const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(yesterdayStart.getTime() / 1000);
+          endTime = Math.floor(yesterdayEnd.getTime() / 1000);
+          break;
+          
+        case 'last_week':
+          // LAST WEEK: From 7 days ago to YESTERDAY END (EXCLUDES today)
+          const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7, 0, 0, 0);
+          const weekEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(weekStart.getTime() / 1000);
+          endTime = Math.floor(weekEnd.getTime() / 1000);
+          break;
+          
+        case 'last_month':
+          // LAST MONTH: From 30 days ago to YESTERDAY END (EXCLUDES today)
+          const monthStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30, 0, 0, 0);
+          const monthEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(monthStart.getTime() / 1000);
+          endTime = Math.floor(monthEnd.getTime() / 1000);
+          break;
+          
+        default:
+          const defaultStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          startTime = Math.floor(defaultStart.getTime() / 1000);
+          endTime = Math.floor(Date.now() / 1000);
+      }
+      
+      let query = 'SELECT COUNT(DISTINCT session_id) as count FROM app_usage_sessions WHERE start_time >= ? AND start_time < ?';
+      const params = [startTime, endTime];
+      
+      if (userId) {
+        query += ' AND user_id = ?';
+        params.push(userId);
+      } else {
+        // Not logged in - return 0
+        query += ' AND 0 = 1';
+      }
+      
+      const stmt = this.db.prepare(query);
+      stmt.bind(params);
+      
+      let count = 0;
+      if (stmt.step()) {
+        const row = stmt.getAsObject();
+        count = row.count || 0;
+      }
+      stmt.free();
+      
+      return count;
+    } catch (error) {
+      console.error('Failed to get active sessions count for timeframe:', error);
       return 0;
     }
   }

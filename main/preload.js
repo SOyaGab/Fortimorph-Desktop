@@ -145,6 +145,34 @@ contextBridge.exposeInMainWorld('conversionAPI', {
     ipcRenderer.invoke('conversion:openFile', options),
 });
 
+// Expose deleted files API
+contextBridge.exposeInMainWorld('deletedFilesAPI', {
+  list: (filters) => 
+    ipcRenderer.invoke('deletedFiles:list', filters),
+  getStats: () => 
+    ipcRenderer.invoke('deletedFiles:getStats'),
+  restore: (fileId, options) => 
+    ipcRenderer.invoke('deletedFiles:restore', fileId, options),
+  permanentlyDelete: (fileId) => 
+    ipcRenderer.invoke('deletedFiles:permanentlyDelete', fileId),
+  emptyTrash: () => 
+    ipcRenderer.invoke('deletedFiles:emptyTrash'),
+});
+
+// Expose duplicate files API
+contextBridge.exposeInMainWorld('duplicateFilesAPI', {
+  scan: (dirPaths, options) => 
+    ipcRenderer.invoke('duplicateFiles:scan', dirPaths, options),
+  getCachedResults: () => 
+    ipcRenderer.invoke('duplicateFiles:getCachedResults'),
+  deleteDuplicates: (hash, filesToKeep) => 
+    ipcRenderer.invoke('duplicateFiles:delete', hash, filesToKeep),
+  getScanHistory: (limit) => 
+    ipcRenderer.invoke('duplicateFiles:getScanHistory', limit),
+  clearResults: () => 
+    ipcRenderer.invoke('duplicateFiles:clearResults'),
+});
+
 // Expose verification API
 contextBridge.exposeInMainWorld('verificationAPI', {
   generate: (options) => 
@@ -177,6 +205,24 @@ contextBridge.exposeInMainWorld('verificationAPI', {
     ipcRenderer.invoke('verification:calculateFolderHash', folderPath),
   parseQRCode: (imagePath) => 
     ipcRenderer.invoke('verification:parseQRCode', imagePath),
+});
+
+// Expose Bluetooth API for file transfers
+contextBridge.exposeInMainWorld('bluetoothAPI', {
+  prepareTransfer: (filePath) => 
+    ipcRenderer.invoke('bluetooth:prepareTransfer', filePath),
+  getChunk: (transferId, chunkIndex) => 
+    ipcRenderer.invoke('bluetooth:getChunk', transferId, chunkIndex),
+  completeTransfer: (transferId) => 
+    ipcRenderer.invoke('bluetooth:completeTransfer', transferId),
+  cancelTransfer: (transferId) => 
+    ipcRenderer.invoke('bluetooth:cancelTransfer', transferId),
+  receiveFile: (fileData) => 
+    ipcRenderer.invoke('bluetooth:receiveFile', fileData),
+  getStatus: (transferId) => 
+    ipcRenderer.invoke('bluetooth:getStatus', transferId),
+  getActiveTransfers: () => 
+    ipcRenderer.invoke('bluetooth:getActiveTransfers'),
 });
 
 // Expose logs API separately for cleaner access
@@ -249,7 +295,23 @@ contextBridge.exposeInMainWorld('electron', {
       'verification:deleteToken',
       'verification:cleanup',
       // Dialog channels
-      'dialog:openDirectory'
+      'dialog:openDirectory',
+      // Shell channels
+      'shell:showItemInFolder',
+      // System channels
+      'system:getUserHome',
+      // Deleted files channels
+      'deletedFiles:list',
+      'deletedFiles:getStats',
+      'deletedFiles:restore',
+      'deletedFiles:permanentlyDelete',
+      'deletedFiles:emptyTrash',
+      // Duplicate files channels
+      'duplicateFiles:scan',
+      'duplicateFiles:getCachedResults',
+      'duplicateFiles:delete',
+      'duplicateFiles:getScanHistory',
+      'duplicateFiles:clearResults'
     ];
     
     if (validChannels.includes(channel)) {

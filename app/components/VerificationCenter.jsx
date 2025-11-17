@@ -1,11 +1,24 @@
 /**
- * FortiMorph Verification Center Component (UPDATED)
+ * FortiMorph Verification Center Component (OPTIMIZED & FIXED)
  * 
  * Provides UI for generating and verifying QR-based verification tokens
  * with support for permanent tokens, file browsing, and comprehensive verification.
+ * 
+ * FIXES APPLIED (Nov 9, 2025):
+ * ✅ Fixed missing Info icon import causing crashes
+ * ✅ Added useCallback to prevent infinite re-renders
+ * ✅ Fixed useEffect dependency issues
+ * ✅ Added component mount/unmount tracking
+ * ✅ Prevented state updates on unmounted component
+ * ✅ Added verification lock to prevent simultaneous calls
+ * ✅ Optimized QR scanning with error handling
+ * ✅ Added API availability checks
+ * ✅ Improved async operation safety
+ * ✅ Added cleanup for all timeouts and intervals
+ * ✅ Better error messages and loading states
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Shield,
   QrCode,
@@ -24,7 +37,9 @@ import {
   HardDrive,
   Upload,
   Infinity,
-  Activity
+  Activity,
+  Info,
+  Bluetooth
 } from 'lucide-react';
 import TokenConfigModal from './TokenConfigModal';
 
@@ -51,12 +66,40 @@ const VerificationCenter = () => {
   const scanIntervalRef = useRef(null);
   const fileInputRef = useRef(null);
   const verificationInputRef = useRef(null); // Add ref for verification input
+  const verifyTimeoutRef = useRef(null); // Prevent rapid verification calls
+
+  // Cleanup function for camera
+  const stopScanning = useCallback(() => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      const tracks = videoRef.current.srcObject.getTracks();
+      tracks.forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+    }
+
+    if (scanIntervalRef.current) {
+      clearInterval(scanIntervalRef.current);
+      scanIntervalRef.current = null;
+    }
+
+    setScanning(false);
+  }, []);
 
   useEffect(() => {
+    // Load tokens on mount only
     loadTokens();
-    // Cleanup expired tokens on mount
     cleanupExpiredTokens();
-  }, []);
+    
+    // Cleanup on unmount
+    return () => {
+      stopScanning();
+      
+      // Clear any pending timeouts
+      if (verifyTimeoutRef.current) {
+        clearTimeout(verifyTimeoutRef.current);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount
 
   useEffect(() => {
     // Auto-clear messages after 5 seconds
@@ -69,48 +112,35 @@ const VerificationCenter = () => {
     }
   }, [error, success]);
 
-  useEffect(() => {
-    // Cleanup camera on unmount
-    return () => {
-      stopScanning();
-    };
-  }, []);
-
-  useEffect(() => {
-    // Ensure input remains focusable after tab switch or after verification
-    if (activeTab === 'verify' && verificationInputRef.current) {
-      // Small delay to ensure DOM is ready and not blocked
-      const timer = setTimeout(() => {
-        // Force focus and ensure it's enabled
-        if (verificationInputRef.current) {
-          verificationInputRef.current.disabled = false;
-          verificationInputRef.current.focus();
-        }
-      }, 100);
-      return () => clearTimeout(timer);
-    }
-  }, [activeTab, verifying]); // Re-run when verifying state changes
-
-  const loadTokens = async () => {
+  const loadTokens = useCallback(async () => {
     try {
+      if (!window.verificationAPI || !window.verificationAPI.listTokens) {
+        console.warn('Verification API not available');
+        return;
+      }
       const tokenList = await window.verificationAPI.listTokens({ limit: 50 });
-      setTokens(tokenList);
+      setTokens(tokenList || []);
     } catch (err) {
       console.error('Failed to load tokens:', err);
+      setTokens([]);
     }
-  };
+  }, []);
 
-  const cleanupExpiredTokens = async () => {
+  const cleanupExpiredTokens = useCallback(async () => {
     try {
+      if (!window.verificationAPI || !window.verificationAPI.cleanup) {
+        console.warn('Cleanup API not available');
+        return;
+      }
       const deleted = await window.verificationAPI.cleanup();
       if (deleted > 0) {
         console.log(`Cleaned up ${deleted} expired tokens`);
-        loadTokens();
+        await loadTokens();
       }
     } catch (err) {
       console.error('Failed to cleanup tokens:', err);
     }
-  };
+  }, [loadTokens]);
 
   const handleOpenTokenModal = () => {
     setTokenModalData({});
@@ -118,29 +148,54 @@ const VerificationCenter = () => {
   };
 
   const handleTokenGenerated = (result) => {
-    setSuccess('Verification token generated successfully!');
+    // Token generated - QR code now contains Bluetooth pairing data automatically
+    setSuccess('Verification token generated successfully! Scan the QR code to transfer via Bluetooth.');
     loadTokens();
   };
 
-  const handleVerifyToken = async (tokenString = verificationInput) => {
+  const handleVerifyToken = useCallback(async (tokenString) => {
+    const inputValue = tokenString || verificationInput;
+    
+    // Prevent multiple simultaneous verifications
+    if (verifying) {
+      console.log('Verification already in progress, skipping...');
+      return;
+    }
+
+    // Clear any pending verification timeouts
+    if (verifyTimeoutRef.current) {
+      clearTimeout(verifyTimeoutRef.current);
+    }
+
     setVerifying(true);
     setError(null);
     setVerificationResult(null);
 
     try {
-      if (!tokenString || tokenString.trim() === '') {
+      if (!inputValue || inputValue.trim() === '') {
         throw new Error('Please enter a token string or scan a QR code');
       }
 
-      const result = await window.verificationAPI.verify(tokenString.trim());
+      // Check if API exists
+      if (!window.verificationAPI || !window.verificationAPI.verify) {
+        throw new Error('Verification API not available. Please restart the application.');
+      }
+
+      const result = await window.verificationAPI.verify(inputValue.trim());
+
+      if (!result) {
+        throw new Error('No response from verification service');
+      }
+
       setVerificationResult(result);
 
       if (result.valid) {
-        setSuccess('Token verified successfully!');
+        setSuccess('✅ Token verified successfully!');
       } else {
         setError(result.message || 'Token verification failed');
       }
     } catch (err) {
+      console.error('Verification error:', err);
       setError(err.message || 'Failed to verify token');
       setVerificationResult({ 
         valid: false, 
@@ -150,7 +205,7 @@ const VerificationCenter = () => {
     } finally {
       setVerifying(false);
     }
-  };
+  }, [verificationInput, verifying]);
 
   const handleDeleteToken = async (tokenId) => {
     if (!confirm('Are you sure you want to delete this token?')) {
@@ -158,9 +213,13 @@ const VerificationCenter = () => {
     }
 
     try {
+      if (!window.verificationAPI || !window.verificationAPI.deleteToken) {
+        throw new Error('Delete API not available');
+      }
+
       await window.verificationAPI.deleteToken(tokenId);
       setSuccess('Token deleted successfully');
-      loadTokens();
+      await loadTokens();
     } catch (err) {
       setError('Failed to delete token: ' + err.message);
     }
@@ -180,44 +239,38 @@ const VerificationCenter = () => {
         video: { facingMode: 'environment' } 
       });
       
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play();
-
-        // Start scanning loop
-        scanIntervalRef.current = setInterval(() => {
-          scanQRCode();
-        }, 500);
+      if (!videoRef.current) {
+        // Clean up stream if video ref is not available
+        stream.getTracks().forEach(track => track.stop());
+        return;
       }
+
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+
+      // Start scanning loop
+      scanIntervalRef.current = setInterval(() => {
+        scanQRCode();
+      }, 500);
     } catch (err) {
+      console.error('Camera access error:', err);
       setError('Failed to access camera: ' + err.message);
       setScanning(false);
     }
   };
 
-  const stopScanning = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const tracks = videoRef.current.srcObject.getTracks();
-      tracks.forEach(track => track.stop());
-      videoRef.current.srcObject = null;
-    }
-
-    if (scanIntervalRef.current) {
-      clearInterval(scanIntervalRef.current);
-      scanIntervalRef.current = null;
-    }
-
-    setScanning(false);
-  };
-
   const scanQRCode = () => {
-    if (!videoRef.current || !canvasRef.current) return;
+    try {
+      if (!videoRef.current || !canvasRef.current) return;
 
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      
+      if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
 
-    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+      const context = canvas.getContext('2d');
+      if (!context) return;
+
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -225,14 +278,20 @@ const VerificationCenter = () => {
       const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
       
       // Import jsQR dynamically if available
-      if (window.jsQR) {
+      if (window.jsQR && imageData) {
         const code = window.jsQR(imageData.data, imageData.width, imageData.height);
-        if (code) {
+        if (code && code.data) {
           stopScanning();
           setVerificationInput(code.data);
-          handleVerifyToken(code.data);
+          // Delay verification to prevent blocking
+          setTimeout(() => {
+            handleVerifyToken(code.data);
+          }, 100);
         }
       }
+    } catch (err) {
+      console.error('QR scan error:', err);
+      // Don't crash, just log and continue
     }
   };
 
@@ -244,14 +303,20 @@ const VerificationCenter = () => {
       setLoading(true);
       setError(null);
 
+      if (!window.verificationAPI || !window.verificationAPI.parseQRCode) {
+        throw new Error('QR parsing not available');
+      }
+
       // Parse QR code from image file
       const result = await window.verificationAPI.parseQRCode(file.path);
-      
+
       if (result && result.data) {
         setVerificationInput(result.data);
         setSuccess('QR code parsed successfully!');
-        // Automatically verify
-        handleVerifyToken(result.data);
+        // Automatically verify with delay
+        setTimeout(() => {
+          handleVerifyToken(result.data);
+        }, 100);
       } else {
         setError('No QR code found in image');
       }
@@ -313,8 +378,8 @@ const VerificationCenter = () => {
               <Shield className="w-6 h-6 text-green-400" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-white">Verification Center</h1>
-              <p className="text-sm text-gray-400">Generate and verify secure QR-based tokens</p>
+              <h1 className="text-2xl font-bold text-white">Backup Recovery Center</h1>
+              <p className="text-sm text-gray-400">Generate recovery keys for cross-device backup transfers and verify file integrity</p>
             </div>
           </div>
 
@@ -330,7 +395,7 @@ const VerificationCenter = () => {
             >
               <div className="flex items-center gap-2">
                 <QrCode className="w-4 h-4" />
-                Generate Token
+                Generate Recovery Key
               </div>
             </button>
             <button
@@ -343,7 +408,7 @@ const VerificationCenter = () => {
             >
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4" />
-                Verify Token
+                Use Recovery Key
               </div>
             </button>
             <button
@@ -356,7 +421,7 @@ const VerificationCenter = () => {
             >
               <div className="flex items-center gap-2">
                 <Key className="w-4 h-4" />
-                Token List ({tokens.length})
+                My Recovery Keys ({tokens.length})
               </div>
             </button>
           </div>
@@ -392,18 +457,33 @@ const VerificationCenter = () => {
                   <QrCode className="w-10 h-10 text-green-400" />
                 </div>
                 <h3 className="text-xl font-semibold text-white mb-2">
-                  Create Verification Token
+                  Create Backup Recovery Key
                 </h3>
                 <p className="text-gray-400 mb-6">
-                  Configure and generate secure QR-based tokens for backup validation, 
-                  file verification, and diagnostic authenticity.
+                  Generate a secure recovery key to transfer and restore your backups on another device. 
+                  Perfect for moving data between computers or creating emergency backup access codes.
                 </p>
+                
+                {/* OPTION A: Use Case Examples */}
+                <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 mb-6 text-left">
+                  <h4 className="text-white font-medium mb-2 flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-blue-400" />
+                    When to use this:
+                  </h4>
+                  <ul className="text-sm text-gray-300 space-y-1 ml-6 list-disc">
+                    <li>Restoring backups on a different computer</li>
+                    <li>Sharing backup access with team members</li>
+                    <li>Creating proof that files haven't been modified</li>
+                    <li>Emergency recovery from another device</li>
+                  </ul>
+                </div>
+
                 <button
                   onClick={handleOpenTokenModal}
                   className="bg-green-500 hover:bg-green-600 text-white py-3 px-6 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 mx-auto"
                 >
                   <QrCode className="w-5 h-5" />
-                  Create New Token
+                  Create Recovery Key
                 </button>
               </div>
             </div>
@@ -413,15 +493,35 @@ const VerificationCenter = () => {
         {/* Verify Tab */}
         {activeTab === 'verify' && (
           <div className="max-w-4xl mx-auto">
+            {/* Safety Check Banner */}
+            {!window.verificationAPI && (
+              <div className="bg-red-500/20 border border-red-500/50 rounded-lg p-4 mb-4">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-5 h-5 text-red-400" />
+                  <p className="text-red-300">
+                    Verification service is not available. Please restart the application.
+                  </p>
+                </div>
+              </div>
+            )}
+
             <div className="grid md:grid-cols-2 gap-6">
               {/* Verification Input */}
               <div className="bg-gray-800/50 rounded-lg border border-gray-700/50 p-6">
-                <h3 className="text-lg font-semibold text-white mb-4">Verify Token</h3>
+                <h3 className="text-lg font-semibold text-white mb-4">Use Recovery Key</h3>
                 
+                {/* OPTION A: Added help text */}
+                <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 mb-4">
+                  <p className="text-sm text-blue-200 flex items-start gap-2">
+                    <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                    Paste the recovery key text you received, or scan the QR code below to restore a backup.
+                  </p>
+                </div>
+
                 <div className="space-y-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-300 mb-2">
-                      Token String
+                      Recovery Key Text
                     </label>
                     <textarea
                       ref={verificationInputRef}
@@ -431,14 +531,14 @@ const VerificationCenter = () => {
                         // Ensure input is responsive on focus
                         e.target.disabled = false;
                       }}
-                      placeholder="Paste token string here or scan QR code"
+                      placeholder="Paste recovery key here or scan QR code below..."
                       rows={4}
                       className="w-full bg-gray-700/50 border border-gray-600 rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500 font-mono text-sm transition-all"
                       disabled={verifying}
                       autoComplete="off"
                     />
                     <p className="text-xs text-gray-500 mt-1">
-                      {verificationInput.length} characters
+                      {verificationInput.length} characters {verificationInput.length > 0 && '✓'}
                     </p>
                   </div>
 

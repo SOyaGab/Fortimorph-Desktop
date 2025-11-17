@@ -42,6 +42,7 @@ const LogsViewer = () => {
   // Load logs on mount and when filters/page change
   useEffect(() => {
     loadLogs();
+    loadLogTypes(); // Also refresh log types when logs change
   }, [filters, pagination.page]);
 
   // Load log types on mount

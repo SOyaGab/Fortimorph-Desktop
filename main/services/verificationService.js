@@ -19,10 +19,19 @@ const os = require('os');
 const db = require('./database');
 
 class VerificationService {
-  constructor() {
+  constructor(logsService = null) {
     this.appSecret = null;
     this.systemId = null;
     this.initialized = false;
+    this.getUserId = null; // Function to get current user ID
+    this.logsService = logsService;
+  }
+
+  /**
+   * Set function to get current user ID
+   */
+  setUserIdProvider(getUserIdFn) {
+    this.getUserId = getUserIdFn;
   }
 
   /**
@@ -150,6 +159,7 @@ class VerificationService {
       isPermanent: ttl === null
     });
     
+    const userId = this.getUserId ? this.getUserId() : null;
     const success = db.addVerificationToken(
       tokenId,
       type,
@@ -163,7 +173,8 @@ class VerificationService {
       metadata,
       signature,
       filePath, // Store file path if browsed
-      fileHash  // Store file hash if browsed
+      fileHash, // Store file hash if browsed
+      userId    // Store user ID for filtering
     );
 
     console.log(`[VerificationService] Database insert result: ${success}`);
@@ -180,6 +191,19 @@ class VerificationService {
     const qrCodeDataUrl = await this.generateQRCode(tokenString);
 
     console.log(`[VerificationService] Generated token: ${tokenId} (${type})${expiresAt ? '' : ' [PERMANENT]'}`);
+
+    // Log token generation
+    if (this.logsService) {
+      const userId = this.getUserId ? this.getUserId() : null;
+      await this.logsService.info(`Verification token generated: ${type}`, 'verification', {
+        tokenId,
+        type,
+        resourceId,
+        resourceName: resourceName || resourceId,
+        ttl: ttl === null ? 'permanent' : ttl,
+        oneTimeUse
+      }, userId);
+    }
 
     return {
       tokenId,
@@ -324,9 +348,30 @@ class VerificationService {
         }
       }
 
+      // Log token verification
+      if (this.logsService) {
+        const userId = this.getUserId ? this.getUserId() : tokenRecord.user_id;
+        await this.logsService.info(`Verification token verified: ${payload.type}`, 'verification', {
+          tokenId: payload.id,
+          type: payload.type,
+          resourceId: payload.resourceId,
+          valid: true,
+          used: markAsUsed && tokenRecord.one_time_use
+        }, userId);
+      }
+
       return result;
     } catch (error) {
       console.error('[VerificationService] Verification error:', error);
+      
+      // Log verification failure
+      if (this.logsService) {
+        const userId = this.getUserId ? this.getUserId() : null;
+        await this.logsService.error(`Verification token validation failed`, 'verification', {
+          error: error.message
+        }, userId);
+      }
+      
       return {
         valid: false,
         error: 'VERIFICATION_ERROR',
@@ -438,34 +483,13 @@ class VerificationService {
    * @returns {Promise<Array>} List of tokens
    */
   async listTokens(filters = {}) {
-    // FIX: db is now imported directly at top
+    // Add userId to filters if available
+    if (!filters.userId && this.getUserId) {
+      filters.userId = this.getUserId();
+    }
     
-    let query = 'SELECT * FROM verification_tokens WHERE 1=1';
-    const params = [];
-
-    if (filters.type) {
-      query += ' AND type = ?';
-      params.push(filters.type);
-    }
-
-    if (filters.resourceId) {
-      query += ' AND resource_id = ?';
-      params.push(filters.resourceId);
-    }
-
-    if (filters.activeOnly) {
-      query += ' AND expires_at > ? AND (one_time_use = 0 OR used = 0)';
-      params.push(Date.now());
-    }
-
-    query += ' ORDER BY issued_at DESC';
-
-    if (filters.limit) {
-      query += ' LIMIT ?';
-      params.push(filters.limit);
-    }
-
-    const tokens = db.getAllVerificationTokens(query, params);
+    // Use the database method which now supports userId filtering
+    const tokens = db.getAllVerificationTokens(filters);
 
     return tokens.map(token => {
       const issuedAt = token.issued_at ? Number(token.issued_at) : null;

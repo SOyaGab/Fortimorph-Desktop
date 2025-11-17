@@ -56,19 +56,33 @@ const Dashboard = () => {
 
   // Fetch system metrics
   const fetchMetrics = async () => {
-    if (isFetching) return; // Prevent overlapping calls
+    if (isFetching) {
+      console.log('[Dashboard] Skipping fetch - already fetching');
+      return; // Prevent overlapping calls
+    }
     
     try {
+      console.log('[Dashboard] Fetching metrics...');
       setIsFetching(true);
       const result = await window.electronAPI.system.getMetrics();
       if (result.success) {
-        setMetrics(result.data);
+        console.log('[Dashboard] Metrics received - CPU:', result.data.cpu.currentLoad + '%', 
+                    'Memory:', result.data.memory.usagePercent + '%', 
+                    'Disk:', result.data.disk[0]?.use + '%',
+                    'History points:', result.data.history.timestamps.length);
+        
+        // Force a new object reference to ensure React detects the change
+        setMetrics({
+          ...result.data,
+          timestamp: Date.now() // Add unique timestamp to force updates
+        });
+        setLastUpdateTime(Date.now());
         setError(null);
       } else {
         throw new Error(result.error || 'Failed to fetch metrics');
       }
     } catch (error) {
-      console.error('Error fetching metrics:', error);
+      console.error('[Dashboard] Error fetching metrics:', error);
       setError(error.message);
     } finally {
       setIsFetching(false);
@@ -509,21 +523,34 @@ const Dashboard = () => {
     return `${minutes}m`;
   };
 
-  // Prepare chart data with memoization - only recalculate when metrics.history changes
+  // Prepare chart data with memoization - recalculate when metrics updates
   const chartData = useMemo(() => {
     if (!metrics?.history?.timestamps || metrics.history.timestamps.length === 0) {
+      console.log('[Dashboard] No chart data available yet');
       return [];
     }
     
     const { cpu, memory, timestamps } = metrics.history;
     
+    console.log('[Dashboard] Building chart data with', timestamps.length, 'data points');
+    console.log('[Dashboard] Latest values - CPU:', cpu[cpu.length - 1]?.toFixed(2) + '%', 
+                'Memory:', memory[memory.length - 1]?.toFixed(2) + '%');
+    
     // Pre-calculate all timestamps at once for better performance
-    return timestamps.map((timestamp, index) => ({
-      time: new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      cpu: parseFloat(cpu[index]) || 0,
-      memory: parseFloat(memory[index]) || 0,
-    }));
-  }, [metrics?.history]);
+    const data = timestamps.map((timestamp, index) => {
+      const cpuVal = typeof cpu[index] === 'number' ? cpu[index] : parseFloat(cpu[index]) || 0;
+      const memVal = typeof memory[index] === 'number' ? memory[index] : parseFloat(memory[index]) || 0;
+      
+      return {
+        time: new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        cpu: Math.round(cpuVal * 100) / 100, // Ensure 2 decimal precision
+        memory: Math.round(memVal * 100) / 100, // Ensure 2 decimal precision
+      };
+    });
+    
+    console.log('[Dashboard] Chart data built successfully with', data.length, 'points');
+    return data;
+  }, [metrics?.timestamp, metrics?.history?.timestamps?.length]);
 
   // Memoize filtered processes to avoid recalculation on every render
   const filteredProcesses = useMemo(() => {
@@ -783,6 +810,11 @@ const Dashboard = () => {
                       backgroundColor: '#001D3D',
                       border: '2px solid #0077B6',
                       borderRadius: '8px',
+                    }}
+                    formatter={(value, name) => {
+                      // Ensure values are displayed with max 2 decimal places
+                      const numValue = typeof value === 'number' ? value : parseFloat(value) || 0;
+                      return [numValue.toFixed(2) + '%', name];
                     }}
                   />
                   <Legend />

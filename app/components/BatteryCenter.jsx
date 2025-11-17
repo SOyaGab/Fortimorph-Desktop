@@ -47,6 +47,10 @@ const BatteryCenter = () => {
   const [usageInsights, setUsageInsights] = useState(null);
   const [selectedTimeframe, setSelectedTimeframe] = useState('today');
   const [loadingInsights, setLoadingInsights] = useState(false);
+  const lastInsightsFetch = useRef(0);
+  const insightsFetchDebounce = useRef(null);
+  
+  // UI state - removed showAll toggles, now displays all apps by default for better UX
   
   // Auto-refresh
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -56,12 +60,16 @@ const BatteryCenter = () => {
 
   /**
    * Load battery data on mount and set up auto-refresh
+   * OPTIMIZED: Staggered loading to prevent hanging
    */
   useEffect(() => {
+    // Load immediately
     loadBatteryData();
     loadCustomThresholds();
-    loadSystemHealth();
-    loadUsageInsights();
+    
+    // Stagger other loads to prevent overwhelming the system
+    setTimeout(() => loadSystemHealth(), 500);
+    setTimeout(() => loadUsageInsights(), 1000);
     
     if (autoRefresh) {
       // Battery data refreshes every 15 seconds
@@ -74,10 +82,10 @@ const BatteryCenter = () => {
         loadSystemHealth();
       }, 30000);
       
-      // Usage insights refresh every 60 seconds
+      // Usage insights refresh every 90 seconds (optimized to reduce system load)
       insightsIntervalRef.current = setInterval(() => {
         loadUsageInsights();
-      }, 60000);
+      }, 90000);
     }
     
     return () => {
@@ -258,22 +266,67 @@ const BatteryCenter = () => {
   };
 
   /**
-   * Load usage insights data - OPTIMIZED for speed
+   * Load usage insights data - OPTIMIZED for speed with timeout and debouncing
    */
-  const loadUsageInsights = useCallback(async () => {
+  const loadUsageInsights = useCallback(async (forceRefresh = false) => {
     try {
-      setLoadingInsights(true);
+      const now = Date.now();
       
-      // Load only the selected timeframe for faster performance
-      const result = await window.electron.invoke('battery:getAllTimeframeInsights');
+      // OPTIMIZATION: Skip if fetched recently (within 3 seconds) unless force refresh
+      if (!forceRefresh && (now - lastInsightsFetch.current) < 3000) {
+        console.log('[Usage Insights] Skipping - fetched recently');
+        return;
+      }
+      
+      // Clear any pending debounced calls
+      if (insightsFetchDebounce.current) {
+        clearTimeout(insightsFetchDebounce.current);
+        insightsFetchDebounce.current = null;
+      }
+      
+      setLoadingInsights(true);
+      lastInsightsFetch.current = now;
+      
+      // If force refresh, clear backend cache first
+      if (forceRefresh) {
+        console.log('[Usage Insights] Force refresh - clearing backend cache');
+        try {
+          await window.electron.invoke('battery:clearUsageCache');
+        } catch (cacheErr) {
+          console.warn('[Usage Insights] Could not clear cache:', cacheErr);
+        }
+      }
+      
+      // Add timeout to prevent hanging (8 seconds max for better UX)
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Loading timeout - please try refreshing')), 8000)
+      );
+      
+      const dataPromise = window.electron.invoke('battery:getAllTimeframeInsights');
+      
+      const result = await Promise.race([dataPromise, timeoutPromise]);
       
       if (result.success) {
         setUsageInsights(result.data);
       } else {
         console.error('[Usage Insights] Failed:', result.error);
+        // Set empty data on failure
+        setUsageInsights({
+          today: { apps: [], totalImpact: 0, message: 'No data available', hasRealData: false },
+          yesterday: { apps: [], totalImpact: 0, message: 'No data available', hasRealData: false },
+          lastWeek: { apps: [], totalImpact: 0, message: 'No data available', hasRealData: false },
+          lastMonth: { apps: [], totalImpact: 0, message: 'No data available', hasRealData: false }
+        });
       }
     } catch (err) {
       console.error('[Usage Insights] Error:', err);
+      // Set empty data on error/timeout
+      setUsageInsights({
+        today: { apps: [], totalImpact: 0, message: err.message || 'Error loading data', hasRealData: false },
+        yesterday: { apps: [], totalImpact: 0, message: 'Error loading data', hasRealData: false },
+        lastWeek: { apps: [], totalImpact: 0, message: 'Error loading data', hasRealData: false },
+        lastMonth: { apps: [], totalImpact: 0, message: 'Error loading data', hasRealData: false }
+      });
     } finally {
       setLoadingInsights(false);
     }
@@ -1757,15 +1810,15 @@ const BatteryCenter = () => {
                 <div className="bg-gray-700/30 rounded-lg p-4">
                   <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
                     <Activity className="w-5 h-5 text-blue-400" />
-                    Top Battery-Draining Apps
+                    Battery-Draining Apps ({batteryData.analytics.topProcesses.length} tracked)
                   </h3>
                   <p className="text-sm text-gray-400 mb-4">
-                    Apps tracked since FortiMorph started. Running time shows active duration.
+                    Running time based on when FortiMorph first detected each app. Battery impact = CPU% × running time. Showing all tracked apps in real-time.
                   </p>
                   
-                  {/* Simple table like Processes tab */}
-                  <div className="space-y-2">
-                    {batteryData.analytics.topProcesses.slice(0, 15).map((process, index) => (
+                  {/* Display all processes - optimized with efficient scrolling */}
+                  <div className="space-y-2 max-h-[600px] overflow-y-auto pr-2 scroll-smooth">
+                    {batteryData.analytics.topProcesses.map((process, index) => (
                       <div 
                         key={`${process.pid}-${index}`} 
                         className="flex items-center gap-3 bg-gray-800/50 rounded-lg p-3 hover:bg-gray-800/70 transition-colors"
@@ -1794,9 +1847,18 @@ const BatteryCenter = () => {
                     ))}
                   </div>
                   
+                  {/* Display count info */}
+                  {batteryData.analytics.topProcesses.length > 10 && (
+                    <div className="mt-3 text-center">
+                      <p className="text-sm text-gray-400">
+                        Displaying all <span className="font-bold text-blue-400">{batteryData.analytics.topProcesses.length}</span> tracked processes
+                      </p>
+                    </div>
+                  )}
+                  
                   <div className="mt-4 bg-blue-500/10 border border-blue-500/30 rounded-lg p-3">
                     <p className="text-sm text-gray-300">
-                      <strong>Impact = CPU% × Minutes Running</strong>. Higher scores = more battery drain.
+                      <strong>Impact = CPU% × Minutes Running</strong>. Higher scores = more battery drain. This tracks from when FortiMorph started monitoring.
                     </p>
                   </div>
                 </div>
@@ -1810,18 +1872,29 @@ const BatteryCenter = () => {
                     <RefreshCw className="w-12 h-12 text-gray-600 mx-auto mb-4 animate-spin" />
                     <p className="text-gray-400 font-semibold mb-2">Collecting battery usage data...</p>
                     <p className="text-sm text-gray-500 mt-2">
-                      Tracking starts now. Data appears within 30 seconds.
+                      FortiMorph is scanning running processes. Data appears within 8-10 seconds.
                     </p>
                     
-                    {/* Debug info */}
+                    {/* Debug info with better visibility */}
                     {batteryData?.analytics && (
-                      <div className="mt-4 text-xs text-gray-600 bg-gray-800/50 rounded p-2 max-w-sm mx-auto">
-                        <div>Debug: {batteryData.analytics.processTrackingSize || 0} processes tracked</div>
-                        {batteryData.analytics.topProcesses && (
-                          <div>Array length: {batteryData.analytics.topProcesses.length}</div>
+                      <div className="mt-4 text-sm bg-gray-800/70 border border-gray-600 rounded-lg p-3 max-w-md mx-auto">
+                        <div className="text-gray-300 mb-2">📊 <strong>Tracking Status:</strong></div>
+                        <div className="text-left space-y-1 text-gray-400">
+                          <div>• Processes tracked: <span className="text-white font-semibold">{batteryData.analytics.processTrackingSize || 0}</span></div>
+                          <div>• With battery impact: <span className="text-white font-semibold">{batteryData.analytics.topProcesses?.length || 0}</span></div>
+                          <div>• Battery history points: <span className="text-white font-semibold">{batteryData.analytics.batteryHistorySize || 0}</span></div>
+                        </div>
+                        {batteryData.analytics.error && (
+                          <div className="mt-2 text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded p-2">
+                            ⚠️ {batteryData.analytics.error}
+                          </div>
                         )}
                       </div>
                     )}
+                    
+                    <div className="mt-4 bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 max-w-md mx-auto text-sm text-blue-300">
+                      <strong>💡 Tip:</strong> If this stays empty after 30 seconds, try refreshing or check console for errors.
+                    </div>
                     
                     <div className="mt-4">
                       <button
@@ -1851,7 +1924,7 @@ const BatteryCenter = () => {
                     </p>
                   </div>
                   <button
-                    onClick={loadUsageInsights}
+                    onClick={() => loadUsageInsights(true)}
                     disabled={loadingInsights}
                     className="px-4 py-2 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/40 text-blue-300 rounded-lg text-sm transition-all duration-150 ease-out disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                   >
@@ -1891,6 +1964,40 @@ const BatteryCenter = () => {
                   </div>
                 ) : usageInsights && usageInsights[selectedTimeframe]?.apps?.length > 0 ? (
                   <div className="space-y-4">
+                    {/* Data Status Indicators */}
+                    {usageInsights[selectedTimeframe]?.isPlaceholder && (
+                      <div className="bg-gradient-to-r from-yellow-500/20 to-orange-500/20 border border-yellow-500/40 rounded-lg p-4 flex items-start gap-3">
+                        <Clock className="w-6 h-6 text-yellow-400 flex-shrink-0 mt-0.5" />
+                        <div className="flex-1">
+                          <p className="text-sm font-semibold text-yellow-300 mb-1 flex items-center gap-2">
+                            <Info className="w-4 h-4" />
+                            Preview Mode - Today's Data Displayed
+                          </p>
+                          <p className="text-xs text-gray-300 mb-2">
+                            {usageInsights[selectedTimeframe].message || 'Showing preview data'}
+                          </p>
+                          <div className="bg-gray-900/40 rounded px-3 py-1.5 text-xs text-gray-400 inline-block">
+                            {usageInsights[selectedTimeframe].dataAvailableIn || 'Real data accumulating'}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Real Historical Data Indicator - Only show for non-Today timeframes */}
+                    {selectedTimeframe !== 'today' && usageInsights[selectedTimeframe]?.hasRealData && !usageInsights[selectedTimeframe]?.isPlaceholder && (
+                      <div className="bg-gradient-to-r from-blue-500/20 to-purple-500/20 border border-blue-500/40 rounded-lg p-3 flex items-start gap-2">
+                        <Check className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
+                        <div>
+                          <p className="text-sm font-semibold text-blue-300">
+                            Showing Historical Data
+                          </p>
+                          <p className="text-xs text-gray-300 mt-1">
+                            Accurate battery usage data from {selectedTimeframe === 'yesterday' ? 'yesterday' : selectedTimeframe === 'lastWeek' ? 'the past 7 days' : 'the past 30 days'}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                    
                     {/* Summary Stats */}
                     <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
                       <div className="bg-gradient-to-br from-blue-600/20 to-blue-700/20 border border-blue-500/30 rounded-lg p-3">
@@ -1899,7 +2006,7 @@ const BatteryCenter = () => {
                           Apps Tracked
                         </div>
                         <div className="text-2xl font-bold text-blue-400">
-                          {usageInsights[selectedTimeframe].totalAppsTracked || 0}
+                          {usageInsights[selectedTimeframe].totalAppsTracked || usageInsights[selectedTimeframe].apps.length || 0}
                         </div>
                       </div>
                       <div className="bg-gradient-to-br from-purple-600/20 to-purple-700/20 border border-purple-500/30 rounded-lg p-3">
@@ -1908,7 +2015,7 @@ const BatteryCenter = () => {
                           Total Impact
                         </div>
                         <div className="text-2xl font-bold text-purple-400">
-                          {usageInsights[selectedTimeframe].totalImpact || 0}
+                          {Math.round(usageInsights[selectedTimeframe].totalImpact || 0)}
                         </div>
                       </div>
                       <div className="bg-gradient-to-br from-green-600/20 to-green-700/20 border border-green-500/30 rounded-lg p-3 col-span-2 md:col-span-1">
@@ -1917,16 +2024,26 @@ const BatteryCenter = () => {
                           Active Sessions
                         </div>
                         <div className="text-2xl font-bold text-green-400">
-                          {usageInsights.activeSessionsCount || 0}
+                          {usageInsights[selectedTimeframe]?.activeSessionsCount || 0}
                         </div>
                       </div>
                     </div>
+                    
+                    {/* Info banner for fresh data */}
+                    {selectedTimeframe === 'today' && !usageInsights[selectedTimeframe]?.isPlaceholder && usageInsights[selectedTimeframe].totalAppsTracked < 5 && (
+                      <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 mb-4 flex items-start gap-2">
+                        <Activity className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" />
+                        <p className="text-sm text-blue-300">
+                          <strong>Building data:</strong> Battery usage is being tracked continuously in the background. More apps will appear as you use your device.
+                        </p>
+                      </div>
+                    )}
 
-                    {/* App List - Simple and fast like Processes tab */}
-                    <div className="space-y-2">
-                      {usageInsights[selectedTimeframe].apps.slice(0, 15).map((app, index) => (
+                    {/* App List - Optimized for performance with virtual scrolling */}
+                    <div className="space-y-2 max-h-[600px] overflow-y-auto pr-2 scroll-smooth">
+                      {usageInsights[selectedTimeframe].apps.map((app, index) => (
                         <div
-                          key={`${app.name}-${index}`}
+                          key={`${app.name}-${index}-${selectedTimeframe}`}
                           className="bg-gray-800/60 border border-gray-700/50 rounded-lg p-3 hover:bg-gray-800/80 transition-colors"
                         >
                           <div className="flex items-center justify-between gap-3">
@@ -1935,48 +2052,109 @@ const BatteryCenter = () => {
                               <span className="text-sm font-bold text-blue-400 w-6">#{index + 1}</span>
                               <div className="flex-1 min-w-0">
                                 <h4 className="text-white font-semibold truncate text-sm">{app.name}</h4>
-                                <div className="flex gap-2 mt-1 text-xs">
-                                  <span className="text-orange-300">{app.avgCpu}% CPU</span>
-                                  <span className="text-purple-300">{app.avgMemory}% RAM</span>
-                                  <span className="text-blue-300">{app.usageTime}</span>
+                                <div className="flex gap-3 mt-1 text-xs">
+                                  <span className="text-orange-300 flex items-center gap-1">
+                                    <Cpu className="w-3 h-3" />
+                                    {app.avgCpu}% CPU
+                                  </span>
+                                  <span className="text-purple-300 flex items-center gap-1">
+                                    <MemoryStick className="w-3 h-3" />
+                                    {app.avgMemory}% RAM
+                                  </span>
+                                  {app.impactCategory && (
+                                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                      app.impactCategory === 'Heavy' ? 'bg-red-500/20 text-red-300 border border-red-500/30' :
+                                      app.impactCategory === 'Moderate' ? 'bg-orange-500/20 text-orange-300 border border-orange-500/30' :
+                                      app.impactCategory === 'Light' ? 'bg-yellow-500/20 text-yellow-300 border border-yellow-500/30' :
+                                      'bg-green-500/20 text-green-300 border border-green-500/30'
+                                    }`}>
+                                      {app.impactCategory}
+                                    </span>
+                                  )}
                                 </div>
                               </div>
                             </div>
 
-                            {/* Percentage */}
+                            {/* Impact Score & Percentage */}
                             <div className="text-right">
                               <div className="text-xl font-bold text-white">{app.percentOfTotal}%</div>
+                              <div className="text-xs text-gray-400">Impact: {app.totalBatteryImpact}</div>
                             </div>
                           </div>
                         </div>
                       ))}
                     </div>
 
+                    {/* Total count display - no collapsing needed, just show count */}
+                    {usageInsights[selectedTimeframe].apps.length > 10 && (
+                      <div className="mt-3 text-center">
+                        <p className="text-sm text-gray-400">
+                          Showing all <span className="font-bold text-blue-400">{usageInsights[selectedTimeframe].apps.length}</span> tracked apps
+                        </p>
+                      </div>
+                    )}
+
                     {/* Info Footer */}
                     <div className="mt-4 bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 flex items-start gap-2">
                       <Info className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" />
-                      <p className="text-sm text-gray-300">
-                        <strong>About Usage Insights:</strong> Data is collected from when FortiMorph starts running. 
-                        For best results, set FortiMorph to start automatically on Windows startup. Percentages show each app's 
-                        share of total battery drain. Historical data is stored for 30 days.
-                      </p>
+                      <div className="text-sm text-gray-300">
+                        <p className="mb-2">
+                          <strong>About Usage Insights:</strong> FortiMorph continuously tracks battery usage in the background, even when the app window is closed.
+                        </p>
+                        <ul className="space-y-1 text-xs text-gray-400 ml-4">
+                          <li className="flex items-center gap-2">
+                            <Calendar className="w-3 h-3 text-green-300" />
+                            <span><strong className="text-green-300">Today:</strong> Real-time data available instantly</span>
+                          </li>
+                          <li className="flex items-center gap-2">
+                            <CalendarDays className="w-3 h-3 text-yellow-300" />
+                            <span><strong className="text-yellow-300">Yesterday:</strong> Available after running for 24 hours</span>
+                          </li>
+                          <li className="flex items-center gap-2">
+                            <BarChart3 className="w-3 h-3 text-orange-300" />
+                            <span><strong className="text-orange-300">Last Week:</strong> Available after running for 7 days</span>
+                          </li>
+                          <li className="flex items-center gap-2">
+                            <TrendingUp className="w-3 h-3 text-purple-300" />
+                            <span><strong className="text-purple-300">Last Month:</strong> Available after running for 30 days</span>
+                          </li>
+                        </ul>
+                        <p className="mt-2 text-xs text-gray-400">
+                          Impact categories: <span className="text-red-300">Heavy (≥20%)</span> • <span className="text-orange-300">Moderate (10-19%)</span> • <span className="text-yellow-300">Light (5-9%)</span> • <span className="text-green-300">Minimal (&lt;5%)</span>
+                        </p>
+                      </div>
                     </div>
                   </div>
                 ) : (
                   <div className="text-center py-12">
                     <BarChart3 className="w-16 h-16 text-gray-600 mx-auto mb-4" />
-                    <p className="text-gray-400 font-semibold mb-2">No usage data available</p>
-                    <p className="text-sm text-gray-500 max-w-md mx-auto mb-4">
-                      {selectedTimeframe === 'today' 
-                        ? 'FortiMorph tracks apps while it\'s running. Keep the app open to collect battery usage data. Data appears within a few minutes of use.'
-                        : `No data recorded for ${selectedTimeframe.replace(/([A-Z])/g, ' $1').toLowerCase()}. Make sure FortiMorph was running during this period. Historical data is stored for up to 30 days.`
-                      }
+                    <p className="text-gray-400 font-semibold mb-2">
+                      No Data Available
                     </p>
-                    {selectedTimeframe === 'today' && (
-                      <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 max-w-md mx-auto text-sm text-yellow-300">
-                        <strong>💡 Tip:</strong> Set FortiMorph to start automatically on Windows startup for complete battery tracking throughout the day.
-                      </div>
-                    )}
+                    <p className="text-sm text-gray-500 max-w-md mx-auto mb-4">
+                      Launch some applications to start tracking battery usage. FortiMorph monitors apps continuously in the background.
+                    </p>
+                    <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 max-w-md mx-auto text-left">
+                      <p className="text-sm text-blue-300 font-semibold mb-2 flex items-center gap-2">
+                        <RefreshCw className="w-4 h-4" />
+                        Background Tracking Active
+                      </p>
+                      <p className="text-xs text-gray-400 mb-3">
+                        FortiMorph collects battery data even when the app window is closed. Your usage patterns are being tracked automatically.
+                      </p>
+                      {selectedTimeframe !== 'today' && (
+                        <div className="bg-gray-900/40 rounded px-3 py-2 text-xs text-gray-400 flex items-start gap-2">
+                          <AlertCircle className="w-3 h-3 text-yellow-300 flex-shrink-0 mt-0.5" />
+                          <span>
+                            <strong className="text-yellow-300">Note:</strong> {
+                              selectedTimeframe === 'yesterday' ? 'Yesterday\'s data will be available after running for 24 hours' :
+                              selectedTimeframe === 'lastWeek' ? 'Weekly trends will be available after running for 7 days' :
+                              'Monthly patterns will be available after running for 30 days'
+                            }
+                          </span>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>

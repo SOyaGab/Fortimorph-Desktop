@@ -30,7 +30,15 @@ class ConversionService {
     this.logs = logsService;
     this.supportedConversions = this.buildConversionMatrix();
     this.markedInitialized = false;
+    this.getUserId = null; // Function to get current user ID
     this.initializeMarked();
+  }
+
+  /**
+   * Set function to get current user ID
+   */
+  setUserIdProvider(getUserIdFn) {
+    this.getUserId = getUserIdFn;
   }
 
   /**
@@ -357,6 +365,7 @@ class ConversionService {
       const duration = Date.now() - startTime;
 
       // Log conversion
+      const userId = this.getUserId ? this.getUserId() : null;
       const conversionRecord = {
         input_path: inputPath,
         output_path: tempOutputPath,
@@ -373,8 +382,8 @@ class ConversionService {
         timestamp: new Date().toISOString()
       };
 
-      await this.db.logConversion(conversionRecord);
-      await this.logs.info('Conversion completed', 'ConversionService', conversionRecord);
+      await this.db.logConversion(conversionRecord, userId);
+      await this.logs.info('Conversion completed', 'ConversionService', conversionRecord, userId);
 
       return {
         success: true,
@@ -388,7 +397,8 @@ class ConversionService {
       };
 
     } catch (error) {
-      await this.logs.error(`Conversion failed: ${error.message}`, 'ConversionService', { inputPath, outputPath });
+      const userId = this.getUserId ? this.getUserId() : null;
+      await this.logs.error(`Conversion failed: ${error.message}`, 'ConversionService', { inputPath, outputPath }, userId);
       
       await this.db.logConversion({
         input_path: inputPath,
@@ -398,7 +408,7 @@ class ConversionService {
         status: 'failed',
         error: error.message,
         timestamp: new Date().toISOString()
-      });
+      }, userId);
 
       throw error;
     }
@@ -696,15 +706,17 @@ ${lines.map((line, i) => `    <line number="${i + 1}">${this.escapeHtml(line)}</
       }
 
       const stats = await fs.stat(outputPath);
+      const userId = this.getUserId ? this.getUserId() : null;
       await this.logs.info('Files packaged successfully', 'ConversionService', {
         fileCount: filePaths.length,
         outputPath,
         size: stats.size
-      });
+      }, userId);
 
       return { success: true, outputPath, fileCount: filePaths.length };
     } catch (error) {
-      await this.logs.error(`Packaging failed: ${error.message}`, 'ConversionService');
+      const userId = this.getUserId ? this.getUserId() : null;
+      await this.logs.error(`Packaging failed: ${error.message}`, 'ConversionService', null, userId);
       throw error;
     }
   }
@@ -1763,7 +1775,8 @@ Total Pages: ${pageCount}\\par
         virusScan: virusScan
       };
     } catch (error) {
-      await this.logs.error(`Verification failed: ${error.message}`, 'ConversionService');
+      const userId = this.getUserId ? this.getUserId() : null;
+      await this.logs.error(`Verification failed: ${error.message}`, 'ConversionService', null, userId);
       return { 
         isValid: false, 
         error: error.message,

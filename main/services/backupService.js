@@ -30,6 +30,15 @@ class BackupService {
     this.backupStorePath = null;
     this.encryptionKey = null;
     this.recoveryKey = null;
+    this.getUserId = null; // Function to get current user ID
+    this.encryptionKeys = new Map(); // Per-user encryption keys cache
+  }
+  
+  /**
+   * Set function to get current user ID
+   */
+  setUserIdProvider(getUserIdFn) {
+    this.getUserId = getUserIdFn;
   }
 
   /**
@@ -57,22 +66,35 @@ class BackupService {
 
   /**
    * Initialize encryption key from database or generate new one
+   * NOTE: This is now per-user. Called on demand when backup is created.
    */
-  async initializeEncryptionKey() {
+  async initializeEncryptionKey(userId = null) {
     try {
-      // Try to get existing key from database
-      const keyRecord = this.db.getSetting('backup_encryption_key');
+      // USER ISOLATION: Each user has their own encryption key
+      const settingKey = 'backup_encryption_key';
+      
+      // Check cache first
+      const cacheKey = userId || 'global';
+      if (this.encryptionKeys.has(cacheKey)) {
+        this.encryptionKey = this.encryptionKeys.get(cacheKey);
+        return true;
+      }
+      
+      // Try to get existing key from database (user-specific)
+      const keyRecord = this.db.getSetting(settingKey, userId);
       
       if (keyRecord) {
         this.encryptionKey = Buffer.from(keyRecord, 'hex');
+        this.encryptionKeys.set(cacheKey, this.encryptionKey);
       } else {
-        // Generate new encryption key
+        // Generate new encryption key for this user
         this.encryptionKey = crypto.randomBytes(32);
         
-        // Save key to database
-        this.db.setSetting('backup_encryption_key', this.encryptionKey.toString('hex'));
+        // Save key to database (user-specific)
+        this.db.setSetting(settingKey, this.encryptionKey.toString('hex'), userId);
+        this.encryptionKeys.set(cacheKey, this.encryptionKey);
         
-        console.log('Generated new backup encryption key');
+        console.log(`Generated new backup encryption key for user: ${userId || 'global'}`);
       }
 
       return true;
@@ -84,13 +106,14 @@ class BackupService {
 
   /**
    * Generate recovery key for backup encryption
+   * USER ISOLATION: Recovery keys are per-user
    */
-  generateRecoveryKey() {
+  generateRecoveryKey(userId = null) {
     const recoveryKey = crypto.randomBytes(32);
     const recoveryKeyString = recoveryKey.toString('base64');
     
-    // Store recovery key info in database
-    this.db.setSetting('backup_recovery_key_generated', Date.now().toString());
+    // Store recovery key info in database (user-specific)
+    this.db.setSetting('backup_recovery_key_generated', Date.now().toString(), userId);
     
     return recoveryKeyString;
   }
@@ -341,10 +364,16 @@ class BackupService {
       name = `Backup_${Date.now()}`,
       encrypt = true,
       compress = true,
-      incremental = true
+      incremental = true,
+      userId = null
     } = options;
 
     try {
+      // USER ISOLATION: Initialize encryption key for current user
+      if (encrypt) {
+        await this.initializeEncryptionKey(userId);
+      }
+      
       // Preflight checks
       const preflightResult = await this.preflightChecks(sourcePath);
       if (preflightResult.errors.length > 0) {
@@ -352,9 +381,10 @@ class BackupService {
       }
 
       // Get previous backup manifest if incremental
+      // USER ISOLATION: Only get backups for current user
       let previousManifest = null;
       if (incremental) {
-        const previousBackups = this.db.getBackups({ source_path: sourcePath });
+        const previousBackups = this.db.getBackups({ source_path: sourcePath }, 10, userId);
         if (previousBackups && previousBackups.length > 0) {
           const lastBackup = previousBackups[previousBackups.length - 1];
           if (lastBackup.manifest) {
@@ -454,7 +484,7 @@ class BackupService {
         file_count: manifest.files.length,
         encrypted: encrypt ? 1 : 0,
         manifest: JSON.stringify(manifest)
-      });
+      }, userId);
 
       // Log backup creation
       this.db.addLog(
@@ -466,7 +496,8 @@ class BackupService {
           totalSize,
           incremental
         }),
-        'info'
+        'info',
+        userId
       );
 
       if (progressCallback) {
@@ -495,7 +526,8 @@ class BackupService {
         'backup',
         `Backup failed: ${error.message}`,
         JSON.stringify({ sourcePath, error: error.stack }),
-        'error'
+        'error',
+        userId
       );
 
       if (progressCallback) {
@@ -623,6 +655,7 @@ class BackupService {
       }
 
       // Log restore
+      const userId = backup.user_id || null;
       this.db.addLog(
         'backup',
         `Backup restored: ${manifest.name}`,
@@ -631,7 +664,8 @@ class BackupService {
           filesRestored: restoredFiles,
           targetPath
         }),
-        'info'
+        'info',
+        userId
       );
 
       if (progressCallback) {
@@ -652,11 +686,14 @@ class BackupService {
     } catch (error) {
       console.error('Restore failed:', error);
       
+      const backup = this.db.getBackupById(backupId);
+      const userId = backup ? backup.user_id : null;
       this.db.addLog(
         'backup',
         `Restore failed: ${error.message}`,
         JSON.stringify({ backupId, error: error.stack }),
-        'error'
+        'error',
+        userId
       );
 
       if (progressCallback) {
@@ -793,11 +830,13 @@ class BackupService {
       }
 
       // Log verification
+      const userId = backup.user_id || null;
       this.db.addLog(
         'backup',
         `Backup verified: ${manifest.name}`,
         JSON.stringify(verificationResults),
-        'info'
+        'info',
+        userId
       );
 
       return verificationResults;
@@ -811,8 +850,8 @@ class BackupService {
   /**
    * List all backups
    */
-  listBackups() {
-    return this.db.getBackups();
+  listBackups(userId = null) {
+    return this.db.getBackups({}, 50, userId);
   }
 
   /**
@@ -834,11 +873,13 @@ class BackupService {
       this.db.deleteBackup(backupId);
 
       // Log deletion
+      const userId = backup.user_id || null;
       this.db.addLog(
         'backup',
         `Backup deleted: ${backup.name}`,
         JSON.stringify({ backupId }),
-        'info'
+        'info',
+        userId
       );
 
       return { success: true };

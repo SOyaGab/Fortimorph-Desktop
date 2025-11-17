@@ -70,14 +70,39 @@ class QuarantineService {
           purged_at INTEGER,
           retry_count INTEGER DEFAULT 0,
           last_retry_at INTEGER,
-          metadata TEXT
+          metadata TEXT,
+          user_id TEXT
         );
         
         CREATE INDEX IF NOT EXISTS idx_quarantine_original_path ON quarantine_files(original_path);
         CREATE INDEX IF NOT EXISTS idx_quarantine_hash ON quarantine_files(file_hash);
         CREATE INDEX IF NOT EXISTS idx_quarantine_restored ON quarantine_files(restored);
         CREATE INDEX IF NOT EXISTS idx_quarantine_purged ON quarantine_files(purged);
+        CREATE INDEX IF NOT EXISTS idx_quarantine_user_id ON quarantine_files(user_id);
       `);
+
+      // Migrate existing table to add user_id column if it doesn't exist
+      try {
+        const checkStmt = this.db.db.prepare("PRAGMA table_info(quarantine_files)");
+        let hasUserId = false;
+        
+        while (checkStmt.step()) {
+          const row = checkStmt.getAsObject();
+          if (row.name === 'user_id') {
+            hasUserId = true;
+            break;
+          }
+        }
+        checkStmt.free();
+        
+        if (!hasUserId) {
+          console.log('Migrating quarantine_files table: adding user_id column');
+          this.db.db.exec(`ALTER TABLE quarantine_files ADD COLUMN user_id TEXT`);
+          console.log('Migration completed for quarantine_files table');
+        }
+      } catch (migrationError) {
+        console.warn('Migration check for quarantine_files table:', migrationError.message);
+      }
 
       this.db.saveDatabase();
       console.log('Quarantine schema initialized successfully');
@@ -101,9 +126,10 @@ class QuarantineService {
    * Move file to quarantine with encryption
    * @param {string} filePath - Path to file to quarantine
    * @param {string} reason - Reason for quarantine
+   * @param {string} userId - User ID who is quarantining the file
    * @returns {Promise<Object>} Quarantine result
    */
-  async quarantineFile(filePath, reason = 'Manual quarantine') {
+  async quarantineFile(filePath, reason = 'Manual quarantine', userId = null) {
     try {
       // Validate file exists
       if (!fs.existsSync(filePath)) {
@@ -130,8 +156,8 @@ class QuarantineService {
       // Store metadata in database
       const stmt = this.db.db.prepare(`
         INSERT INTO quarantine_files 
-        (original_path, original_name, quarantine_path, file_hash, size, encrypted, reason, metadata)
-        VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+        (original_path, original_name, quarantine_path, file_hash, size, encrypted, reason, metadata, user_id)
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
       `);
 
       const metadata = JSON.stringify({
@@ -141,7 +167,7 @@ class QuarantineService {
         timestamp: timestamp
       });
 
-      stmt.run([filePath, originalName, quarantinePath, fileHash, stats.size, reason, metadata]);
+      stmt.run([filePath, originalName, quarantinePath, fileHash, stats.size, reason, metadata, userId]);
       stmt.free();
 
       const quarantineId = this.db.db.exec('SELECT last_insert_rowid() as id')[0].values[0][0];
@@ -351,20 +377,29 @@ class QuarantineService {
    * @param {number} quarantineId - Quarantine record ID
    * @param {string} restorePath - Optional custom restore path
    * @param {string} conflictMode - 'overwrite', 'rename', or 'skip'
+   * @param {string} userId - User ID to verify ownership
    * @returns {Promise<Object>} Restore result
    */
-  async restoreFile(quarantineId, restorePath = null, conflictMode = 'rename') {
+  async restoreFile(quarantineId, restorePath = null, conflictMode = 'rename', userId = null) {
     try {
-      // Get quarantine record
-      const stmt = this.db.db.prepare(`
+      // Get quarantine record with user verification
+      let query = `
         SELECT * FROM quarantine_files 
         WHERE id = ? AND restored = 0 AND purged = 0
-      `);
-      stmt.bind([quarantineId]);
+      `;
+      const params = [quarantineId];
+      
+      if (userId) {
+        query += ' AND user_id = ?';
+        params.push(userId);
+      }
+      
+      const stmt = this.db.db.prepare(query);
+      stmt.bind(params);
 
       if (!stmt.step()) {
         stmt.free();
-        throw new Error('Quarantine record not found or already restored/purged');
+        throw new Error('Quarantine record not found, already restored/purged, or access denied');
       }
 
       const record = stmt.getAsObject();
@@ -461,20 +496,29 @@ class QuarantineService {
   /**
    * Purge file from quarantine permanently
    * @param {number} quarantineId - Quarantine record ID
+   * @param {string} userId - User ID to verify ownership
    * @returns {Promise<Object>} Purge result
    */
-  async purgeFile(quarantineId) {
+  async purgeFile(quarantineId, userId = null) {
     try {
-      // Get quarantine record
-      const stmt = this.db.db.prepare(`
+      // Get quarantine record with user verification
+      let query = `
         SELECT * FROM quarantine_files 
         WHERE id = ? AND purged = 0
-      `);
-      stmt.bind([quarantineId]);
+      `;
+      const params = [quarantineId];
+      
+      if (userId) {
+        query += ' AND user_id = ?';
+        params.push(userId);
+      }
+      
+      const stmt = this.db.db.prepare(query);
+      stmt.bind(params);
 
       if (!stmt.step()) {
         stmt.free();
-        throw new Error('Quarantine record not found or already purged');
+        throw new Error('Quarantine record not found, already purged, or access denied');
       }
 
       const record = stmt.getAsObject();
@@ -521,6 +565,12 @@ class QuarantineService {
     try {
       let query = 'SELECT * FROM quarantine_files WHERE restored = 0 AND purged = 0';
       const params = [];
+
+      // Filter by user_id for data isolation
+      if (filters.userId) {
+        query += ' AND user_id = ?';
+        params.push(filters.userId);
+      }
 
       if (filters.searchTerm) {
         query += ' AND original_name LIKE ?';
@@ -575,8 +625,9 @@ class QuarantineService {
 
   /**
    * Get quarantine statistics
+   * @param {string} userId - Optional user ID to filter stats
    */
-  getQuarantineStats() {
+  getQuarantineStats(userId = null) {
     try {
       const stats = {
         totalFiles: 0,
@@ -587,11 +638,22 @@ class QuarantineService {
       };
 
       // Total quarantined files (not restored/purged)
-      const activeStmt = this.db.db.prepare(`
+      let activeQuery = `
         SELECT COUNT(*) as count, COALESCE(SUM(size), 0) as size 
         FROM quarantine_files 
         WHERE restored = 0 AND purged = 0
-      `);
+      `;
+      const activeParams = [];
+      
+      if (userId) {
+        activeQuery += ' AND user_id = ?';
+        activeParams.push(userId);
+      }
+      
+      const activeStmt = this.db.db.prepare(activeQuery);
+      if (activeParams.length > 0) {
+        activeStmt.bind(activeParams);
+      }
       activeStmt.step();
       const activeResult = activeStmt.getAsObject();
       stats.totalFiles = activeResult.count;
@@ -599,17 +661,35 @@ class QuarantineService {
       activeStmt.free();
 
       // Restored files count
-      const restoredStmt = this.db.db.prepare(`
-        SELECT COUNT(*) as count FROM quarantine_files WHERE restored = 1
-      `);
+      let restoredQuery = `SELECT COUNT(*) as count FROM quarantine_files WHERE restored = 1`;
+      const restoredParams = [];
+      
+      if (userId) {
+        restoredQuery += ' AND user_id = ?';
+        restoredParams.push(userId);
+      }
+      
+      const restoredStmt = this.db.db.prepare(restoredQuery);
+      if (restoredParams.length > 0) {
+        restoredStmt.bind(restoredParams);
+      }
       restoredStmt.step();
       stats.restoredFiles = restoredStmt.getAsObject().count;
       restoredStmt.free();
 
       // Purged files count
-      const purgedStmt = this.db.db.prepare(`
-        SELECT COUNT(*) as count FROM quarantine_files WHERE purged = 1
-      `);
+      let purgedQuery = `SELECT COUNT(*) as count FROM quarantine_files WHERE purged = 1`;
+      const purgedParams = [];
+      
+      if (userId) {
+        purgedQuery += ' AND user_id = ?';
+        purgedParams.push(userId);
+      }
+      
+      const purgedStmt = this.db.db.prepare(purgedQuery);
+      if (purgedParams.length > 0) {
+        purgedStmt.bind(purgedParams);
+      }
       purgedStmt.step();
       stats.purgedFiles = purgedStmt.getAsObject().count;
       purgedStmt.free();
@@ -714,8 +794,27 @@ class QuarantineService {
    * Log message
    */
   log(level, message, metadata = {}) {
-    if (this.logsService && typeof this.logsService.log === 'function') {
-      this.logsService.log('quarantine', level, message, metadata);
+    if (this.logsService) {
+      try {
+        switch (level) {
+          case 'error':
+            this.logsService.error(message, 'quarantine', metadata);
+            break;
+          case 'warn':
+          case 'warning':
+            this.logsService.warn(message, 'quarantine', metadata);
+            break;
+          case 'debug':
+            this.logsService.debug(message, 'quarantine', metadata);
+            break;
+          case 'info':
+          default:
+            this.logsService.info(message, 'quarantine', metadata);
+            break;
+        }
+      } catch (error) {
+        console.log(`[Quarantine][${level}]`, message, metadata);
+      }
     } else {
       console.log(`[Quarantine][${level}]`, message, metadata);
     }

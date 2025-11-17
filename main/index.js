@@ -15,6 +15,9 @@ const BackupService = require('./services/backupService');
 const ConversionService = require('./services/conversionService');
 const { verificationService } = require('./services/verificationService');
 const antivirusService = require('./services/antivirusService');
+const DeletedFilesService = require('./services/deletedFilesService');
+const DuplicateFilesService = require('./services/duplicateFilesService');
+const BackgroundMonitor = require('./services/backgroundMonitor');
 
 // Initialize services
 let logsService;
@@ -23,6 +26,9 @@ let systemHealthService;
 let quarantineService;
 let backupService;
 let conversionService;
+let deletedFilesService;
+let duplicateFilesService;
+let backgroundMonitor;
 
 // Initialize electron-store for secure configuration
 const store = new Store();
@@ -149,6 +155,7 @@ app.whenReady().then(async () => {
     // Initialize logs service
     logsService = new LogsService(db);
     await logsService.initialize();
+    logsService.setUserIdProvider(() => getCurrentUserId());
     console.log('Logs service initialized');
     
     // Schedule automatic log cleanup (30 days retention)
@@ -156,11 +163,19 @@ app.whenReady().then(async () => {
     
     // Initialize battery service
     batteryService = new BatteryService(db);
+    // Pass getCurrentUserId function so service can get current user
+    batteryService.setUserIdProvider(() => getCurrentUserId());
     await batteryService.initialize();
     console.log('Battery service initialized');
     
+    // Initialize background monitor (runs even when UI is closed)
+    backgroundMonitor = new BackgroundMonitor(db);
+    await backgroundMonitor.start();
+    console.log('Background monitor started - data collection will continue even when app is minimized');
+    
     // Initialize system health service
     systemHealthService = new SystemHealthService(db);
+    systemHealthService.setUserIdProvider(() => getCurrentUserId());
     await systemHealthService.initialize();
     console.log('System health service initialized');
     
@@ -173,15 +188,34 @@ app.whenReady().then(async () => {
     const backupBasePath = path.join(app.getPath('userData'), 'backups');
     backupService = new BackupService(db);
     await backupService.initialize(backupBasePath);
+    backupService.setUserIdProvider(() => getCurrentUserId());
     console.log('Backup service initialized');
     
     // Initialize conversion service
     conversionService = new ConversionService(db, logsService);
+    conversionService.setUserIdProvider(() => getCurrentUserId());
     console.log('Conversion service initialized');
     
     // Initialize antivirus service
     await antivirusService.initialize();
     console.log('Antivirus service initialized');
+    
+    // Initialize deleted files service
+    const trashBasePath = path.join(app.getPath('userData'), 'trash');
+    deletedFilesService = new DeletedFilesService(db, logsService);
+    deletedFilesService.setUserIdProvider(() => getCurrentUserId());
+    await deletedFilesService.initialize(trashBasePath);
+    console.log('Deleted files service initialized');
+    
+    // Initialize duplicate files service
+    duplicateFilesService = new DuplicateFilesService(db, logsService);
+    duplicateFilesService.setUserIdProvider(() => getCurrentUserId());
+    console.log('Duplicate files service initialized');
+    
+    // Set userId provider and logsService for verification service
+    verificationService.logsService = logsService;
+    verificationService.setUserIdProvider(() => getCurrentUserId());
+    console.log('Verification service configured with userId provider');
   } catch (error) {
     console.error('Failed to initialize services:', error);
   }
@@ -196,17 +230,40 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
+  // NOTE: Background monitor continues running even when UI is closed
+  // This allows continuous data collection
+  console.log('[App] Window closed - background monitor continues running');
+  
   // Cleanup services
   if (quarantineService) {
     quarantineService.cleanup();
   }
   
-  // Close database connection
-  db.close();
+  // Don't close database - background monitor needs it
+  // db.close();
   
   if (process.platform !== 'darwin') {
-    app.quit();
+    // Don't quit app completely - keep background processes running
+    // app.quit();
   }
+});
+
+// Cleanup on actual app quit (not just window close)
+app.on('before-quit', () => {
+  console.log('[App] Application quitting - cleaning up background services');
+  
+  // Stop background monitor
+  if (backgroundMonitor) {
+    backgroundMonitor.stop();
+  }
+  
+  // Stop battery service
+  if (batteryService) {
+    batteryService.stop();
+  }
+  
+  // Close database connection
+  db.close();
 });
 
 // Session management helpers
@@ -225,6 +282,11 @@ function clearSession() {
   sessionData.isAuthenticated = false;
   sessionData.user = null;
   sessionData.sessionToken = null;
+}
+
+// Get current user ID from session
+function getCurrentUserId() {
+  return sessionData.isAuthenticated && sessionData.user ? sessionData.user.uid : null;
 }
 
 // IPC handlers for secure communication
@@ -291,6 +353,21 @@ ipcMain.handle('auth:login', async (event, { email, password }) => {
       sessionData.sessionToken = result.user.uid;
       startSessionTimeout();
       console.log('Session established for user:', result.user.uid);
+      
+      // CRITICAL FIX: Clear cached battery usage insights when user logs in
+      // This ensures each user sees their own fresh data, not cached data from previous user
+      if (batteryService && typeof batteryService.clearUserCache === 'function') {
+        batteryService.clearUserCache();
+        console.log('Battery cache cleared for new user session');
+      }
+      
+      // Trigger immediate process scan for new user to populate today's data
+      if (batteryService && typeof batteryService.updateProcessTrackingAsync === 'function') {
+        console.log('Triggering immediate process scan for new user');
+        batteryService.updateProcessTrackingAsync().catch(err => {
+          console.error('Initial process scan failed (non-critical):', err);
+        });
+      }
     }
     
     return result;
@@ -304,6 +381,13 @@ ipcMain.handle('auth:logout', async () => {
   try {
     await firebase.logout();
     clearSession();
+    
+    // Clear battery cache on logout to prevent data leakage between users
+    if (batteryService && typeof batteryService.clearUserCache === 'function') {
+      batteryService.clearUserCache();
+      console.log('Battery cache cleared on logout');
+    }
+    
     return { success: true };
   } catch (error) {
     return { success: false, error: error.message };
@@ -877,7 +961,8 @@ ipcMain.handle('logs:getFiltered', async (_event, filters, page, pageSize) => {
 // Get available log types
 ipcMain.handle('logs:getTypes', async () => {
   try {
-    return db.getLogTypes();
+    const userId = getCurrentUserId();
+    return db.getLogTypes(userId);
   } catch (error) {
     console.error('Error getting log types:', error);
     return [];
@@ -887,7 +972,8 @@ ipcMain.handle('logs:getTypes', async () => {
 // Export logs to CSV
 ipcMain.handle('logs:exportCSV', async (_event, filters) => {
   try {
-    const result = await logsService.exportToCSV(filters);
+    const userId = getCurrentUserId();
+    const result = await logsService.exportToCSV({ ...filters, userId });
     return result;
   } catch (error) {
     console.error('Error exporting logs to CSV:', error);
@@ -898,7 +984,8 @@ ipcMain.handle('logs:exportCSV', async (_event, filters) => {
 // Export logs to JSON
 ipcMain.handle('logs:exportJSON', async (_event, filters) => {
   try {
-    const result = await logsService.exportToJSON(filters);
+    const userId = getCurrentUserId();
+    const result = await logsService.exportToJSON({ ...filters, userId });
     return result;
   } catch (error) {
     console.error('Error exporting logs to JSON:', error);
@@ -909,7 +996,8 @@ ipcMain.handle('logs:exportJSON', async (_event, filters) => {
 // Export logs to XML
 ipcMain.handle('logs:exportXML', async (_event, filters) => {
   try {
-    const result = await logsService.exportToXML(filters);
+    const userId = getCurrentUserId();
+    const result = await logsService.exportToXML({ ...filters, userId });
     return result;
   } catch (error) {
     console.error('Error exporting logs to XML:', error);
@@ -920,7 +1008,8 @@ ipcMain.handle('logs:exportXML', async (_event, filters) => {
 // Export logs to TXT
 ipcMain.handle('logs:exportTXT', async (_event, filters) => {
   try {
-    const result = await logsService.exportToTXT(filters);
+    const userId = getCurrentUserId();
+    const result = await logsService.exportToTXT({ ...filters, userId });
     return result;
   } catch (error) {
     console.error('Error exporting logs to TXT:', error);
@@ -931,7 +1020,8 @@ ipcMain.handle('logs:exportTXT', async (_event, filters) => {
 // Export logs to HTML
 ipcMain.handle('logs:exportHTML', async (_event, filters) => {
   try {
-    const result = await logsService.exportToHTML(filters);
+    const userId = getCurrentUserId();
+    const result = await logsService.exportToHTML({ ...filters, userId });
     return result;
   } catch (error) {
     console.error('Error exporting logs to HTML:', error);
@@ -942,7 +1032,8 @@ ipcMain.handle('logs:exportHTML', async (_event, filters) => {
 // Export logs to Markdown
 ipcMain.handle('logs:exportMarkdown', async (_event, filters) => {
   try {
-    const result = await logsService.exportToMarkdown(filters);
+    const userId = getCurrentUserId();
+    const result = await logsService.exportToMarkdown({ ...filters, userId });
     return result;
   } catch (error) {
     console.error('Error exporting logs to Markdown:', error);
@@ -953,7 +1044,8 @@ ipcMain.handle('logs:exportMarkdown', async (_event, filters) => {
 // Export diagnostic package
 ipcMain.handle('logs:exportDiagnostic', async (_event, filters) => {
   try {
-    const result = await logsService.exportDiagnosticZIP(filters);
+    const userId = getCurrentUserId();
+    const result = await logsService.exportDiagnosticZIP({ ...filters, userId });
     return result;
   } catch (error) {
     console.error('Error exporting diagnostic package:', error);
@@ -1190,7 +1282,8 @@ ipcMain.handle('battery:getHistoricalUsage', async (_event, timeframe) => {
     if (!batteryService) {
       return { success: false, error: 'Battery service not initialized' };
     }
-    const data = await batteryService.getHistoricalAppUsageAnalytics(timeframe || 'today');
+    const userId = getCurrentUserId();
+    const data = await batteryService.getHistoricalAppUsageAnalytics(timeframe || 'today', userId);
     return { success: true, data };
   } catch (error) {
     console.error('Error getting historical app usage:', error);
@@ -1204,10 +1297,50 @@ ipcMain.handle('battery:getAllTimeframeInsights', async () => {
     if (!batteryService) {
       return { success: false, error: 'Battery service not initialized' };
     }
-    const data = await batteryService.getAllTimeframeUsageInsights();
+    const userId = getCurrentUserId();
+    
+    // CRITICAL FIX: Trigger immediate process scan if no tracking data exists yet
+    // This ensures new users see data immediately instead of waiting for periodic updates
+    if (batteryService.processTracking && batteryService.processTracking.size === 0) {
+      console.log('[Usage Insights Request] No process tracking data yet - triggering immediate scan');
+      try {
+        // Don't await - let it run in background while we fetch what we have
+        batteryService.updateProcessTrackingAsync().catch(err => {
+          console.error('[Usage Insights] Background scan failed (non-critical):', err);
+        });
+        
+        // Give it a moment to collect initial data (500ms should be enough for fast scan)
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (scanError) {
+        console.error('[Usage Insights] Initial scan failed:', scanError);
+        // Continue anyway - we'll show what we have
+      }
+    }
+    
+    const data = await batteryService.getAllTimeframeUsageInsights(userId);
     return { success: true, data };
   } catch (error) {
     console.error('Error getting all timeframe insights:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Clear usage insights cache (for force refresh)
+ipcMain.handle('battery:clearUsageCache', async () => {
+  try {
+    if (!batteryService) {
+      return { success: false, error: 'Battery service not initialized' };
+    }
+    
+    if (typeof batteryService.clearUserCache === 'function') {
+      batteryService.clearUserCache();
+      console.log('[Usage Cache] Cleared on user request');
+      return { success: true };
+    }
+    
+    return { success: false, error: 'Clear cache method not available' };
+  } catch (error) {
+    console.error('Error clearing usage cache:', error);
     return { success: false, error: error.message };
   }
 });
@@ -1310,7 +1443,8 @@ ipcMain.handle('quarantine:quarantineFile', async (_event, { filePath, reason })
     if (!quarantineService) {
       return { success: false, error: 'Quarantine service not initialized' };
     }
-    const result = await quarantineService.quarantineFile(filePath, reason);
+    const userId = getCurrentUserId();
+    const result = await quarantineService.quarantineFile(filePath, reason, userId);
     return result;
   } catch (error) {
     console.error('Error quarantining file:', error);
@@ -1333,8 +1467,9 @@ ipcMain.handle('quarantine:restoreFile', async (_event, params) => {
       throw new Error('Missing required parameter: quarantineId');
     }
     
+    const userId = getCurrentUserId();
     console.log(`[Quarantine] Starting restore of file ID ${quarantineId}...`);
-    const result = await quarantineService.restoreFile(quarantineId, restorePath, conflictMode);
+    const result = await quarantineService.restoreFile(quarantineId, restorePath, conflictMode, userId);
     const duration = Date.now() - startTime;
     console.log(`[Quarantine] Restore completed in ${duration}ms:`, result);
     return result;
@@ -1354,7 +1489,8 @@ ipcMain.handle('quarantine:purgeFile', async (_event, { quarantineId }) => {
     if (!quarantineService) {
       return { success: false, error: 'Quarantine service not initialized' };
     }
-    const result = await quarantineService.purgeFile(quarantineId);
+    const userId = getCurrentUserId();
+    const result = await quarantineService.purgeFile(quarantineId, userId);
     return result;
   } catch (error) {
     console.error('Error purging file:', error);
@@ -1368,7 +1504,8 @@ ipcMain.handle('quarantine:getQuarantinedFiles', async (_event, filters) => {
     if (!quarantineService) {
       return { success: false, error: 'Quarantine service not initialized' };
     }
-    const files = quarantineService.getQuarantinedFiles(filters || {});
+    const userId = getCurrentUserId();
+    const files = quarantineService.getQuarantinedFiles({ ...filters, userId });
     return files;
   } catch (error) {
     console.error('Error getting quarantined files:', error);
@@ -1382,7 +1519,8 @@ ipcMain.handle('quarantine:getStats', async () => {
     if (!quarantineService) {
       return { success: false, error: 'Quarantine service not initialized' };
     }
-    const stats = quarantineService.getQuarantineStats();
+    const userId = getCurrentUserId();
+    const stats = quarantineService.getQuarantineStats(userId);
     return stats;
   } catch (error) {
     console.error('Error getting quarantine stats:', error);
@@ -1436,7 +1574,8 @@ ipcMain.handle('backup:create', async (_event, { name, sourcePath, options }) =>
       return { success: false, error: 'Backup service not initialized' };
     }
     
-    const result = await backupService.createBackup(sourcePath, { name, ...options });
+    const userId = getCurrentUserId();
+    const result = await backupService.createBackup(sourcePath, { name, ...options, userId });
     return result;
   } catch (error) {
     console.error('Error creating backup:', error);
@@ -1489,7 +1628,8 @@ ipcMain.handle('backup:list', async () => {
       return [];
     }
     
-    const backups = backupService.listBackups();
+    const userId = getCurrentUserId();
+    const backups = backupService.listBackups(userId);
     return backups;
   } catch (error) {
     console.error('Error listing backups:', error);
@@ -1519,10 +1659,190 @@ ipcMain.handle('backup:generateRecoveryKey', async () => {
       return { success: false, error: 'Backup service not initialized' };
     }
     
-    const recoveryKey = backupService.generateRecoveryKey();
+    const userId = getCurrentUserId();
+    const recoveryKey = backupService.generateRecoveryKey(userId);
     return { success: true, recoveryKey };
   } catch (error) {
     console.error('Error generating recovery key:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ========================================
+// Deleted Files IPC Handlers
+// ========================================
+
+// List deleted files
+ipcMain.handle('deletedFiles:list', async (_event, filters) => {
+  try {
+    if (!deletedFilesService) {
+      return [];
+    }
+    
+    const userId = getCurrentUserId();
+    const files = await deletedFilesService.getDeletedFiles({ ...filters, userId });
+    return files;
+  } catch (error) {
+    console.error('Error listing deleted files:', error);
+    return [];
+  }
+});
+
+// Get deleted files statistics
+ipcMain.handle('deletedFiles:getStats', async () => {
+  try {
+    if (!deletedFilesService) {
+      return { totalCount: 0, totalSize: 0, byType: {}, folders: 0 };
+    }
+    
+    const userId = getCurrentUserId();
+    const stats = await deletedFilesService.getStatistics(userId);
+    return stats;
+  } catch (error) {
+    console.error('Error getting deleted files stats:', error);
+    return { totalCount: 0, totalSize: 0, byType: {}, folders: 0 };
+  }
+});
+
+// Restore deleted file
+ipcMain.handle('deletedFiles:restore', async (_event, fileId, options) => {
+  try {
+    if (!deletedFilesService) {
+      return { success: false, error: 'Deleted files service not initialized' };
+    }
+    
+    const result = await deletedFilesService.restoreFile(fileId, options || {});
+    return result;
+  } catch (error) {
+    console.error('Error restoring file:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Permanently delete file
+ipcMain.handle('deletedFiles:permanentlyDelete', async (_event, fileId) => {
+  try {
+    if (!deletedFilesService) {
+      return { success: false, error: 'Deleted files service not initialized' };
+    }
+    
+    const result = await deletedFilesService.permanentlyDelete(fileId);
+    return result;
+  } catch (error) {
+    console.error('Error permanently deleting file:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Empty trash
+ipcMain.handle('deletedFiles:emptyTrash', async () => {
+  try {
+    if (!deletedFilesService) {
+      return { success: false, error: 'Deleted files service not initialized' };
+    }
+    
+    const result = await deletedFilesService.emptyTrash();
+    return result;
+  } catch (error) {
+    console.error('Error emptying trash:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ========================================
+// Duplicate Files IPC Handlers
+// ========================================
+
+// Scan for duplicates
+ipcMain.handle('duplicateFiles:scan', async (_event, dirPaths, options) => {
+  try {
+    if (!duplicateFilesService) {
+      return { success: false, error: 'Duplicate files service not initialized' };
+    }
+    
+    const result = await duplicateFilesService.findDuplicates(dirPaths, options || {});
+    
+    // Save scan results to database
+    if (result) {
+      await duplicateFilesService.saveScanResults(result);
+    }
+    
+    return result;
+  } catch (error) {
+    console.error('Error scanning for duplicates:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get cached scan results
+ipcMain.handle('duplicateFiles:getCachedResults', async () => {
+  try {
+    if (!duplicateFilesService) {
+      return null;
+    }
+    
+    const results = duplicateFilesService.getCachedResults();
+    return results;
+  } catch (error) {
+    console.error('Error getting cached results:', error);
+    return null;
+  }
+});
+
+// Delete duplicate files
+ipcMain.handle('duplicateFiles:delete', async (_event, hash, filesToKeep) => {
+  try {
+    if (!duplicateFilesService) {
+      return { success: false, error: 'Duplicate files service not initialized' };
+    }
+    
+    // Get cached results
+    const scanResults = duplicateFilesService.getCachedResults();
+    if (!scanResults) {
+      return { success: false, error: 'No scan results available' };
+    }
+    
+    // Find the duplicate group
+    const group = scanResults.duplicateGroups.find(g => g.hash === hash);
+    if (!group) {
+      return { success: false, error: 'Duplicate group not found' };
+    }
+    
+    const result = await duplicateFilesService.deleteDuplicates(group, filesToKeep || []);
+    return { success: true, ...result };
+  } catch (error) {
+    console.error('Error deleting duplicates:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get scan history
+ipcMain.handle('duplicateFiles:getScanHistory', async (_event, limit) => {
+  const userId = getCurrentUserId();
+  try {
+    if (!duplicateFilesService) {
+      return [];
+    }
+    
+    const history = duplicateFilesService.getScanHistory(limit || 10, userId);
+    return history;
+  } catch (error) {
+    console.error('Error getting scan history:', error);
+    return [];
+  }
+});
+
+// Clear cached results
+ipcMain.handle('duplicateFiles:clearResults', async () => {
+  try {
+    if (!duplicateFilesService) {
+      return { success: false, error: 'Duplicate files service not initialized' };
+    }
+    
+    duplicateFilesService.clearResults();
+    return { success: true };
+  } catch (error) {
+    console.error('Error clearing results:', error);
     return { success: false, error: error.message };
   }
 });
@@ -1604,7 +1924,8 @@ ipcMain.handle('verification:cleanup', async () => {
 // Get backups for resource selection
 ipcMain.handle('verification:getBackups', async () => {
   try {
-    const backups = db.getBackupsForSelection();
+    const userId = getCurrentUserId();
+    const backups = db.getBackupsForSelection(userId);
     return backups;
   } catch (error) {
     console.error('Error getting backups:', error);
@@ -1615,7 +1936,8 @@ ipcMain.handle('verification:getBackups', async () => {
 // Get conversion history for resource selection
 ipcMain.handle('verification:getConversionHistory', async () => {
   try {
-    const conversions = db.getConversionHistoryForSelection();
+    const userId = getCurrentUserId();
+    const conversions = db.getConversionHistoryForSelection(userId);
     return conversions;
   } catch (error) {
     console.error('Error getting conversion history:', error);
@@ -1626,7 +1948,8 @@ ipcMain.handle('verification:getConversionHistory', async () => {
 // Get diagnostic reports for resource selection
 ipcMain.handle('verification:getDiagnosticReports', async () => {
   try {
-    const reports = db.getDiagnosticReportsForSelection();
+    const userId = getCurrentUserId();
+    const reports = db.getDiagnosticReportsForSelection(userId);
     return reports;
   } catch (error) {
     console.error('Error getting diagnostic reports:', error);
@@ -1740,6 +2063,82 @@ ipcMain.handle('verification:calculateFolderHash', async (_event, folderPath) =>
   }
 });
 
+// ========================================
+// BLUETOOTH FILE TRANSFER HANDLERS
+// ========================================
+
+const bluetoothService = require('./services/bluetoothService');
+
+// Prepare file for Bluetooth transfer
+ipcMain.handle('bluetooth:prepareTransfer', async (_event, filePath) => {
+  try {
+    return await bluetoothService.prepareFileTransfer(filePath);
+  } catch (error) {
+    console.error('[Bluetooth IPC] Prepare transfer error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get file chunk for transfer
+ipcMain.handle('bluetooth:getChunk', async (_event, transferId, chunkIndex) => {
+  try {
+    return await bluetoothService.getFileChunk(transferId, chunkIndex);
+  } catch (error) {
+    console.error('[Bluetooth IPC] Get chunk error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Complete file transfer
+ipcMain.handle('bluetooth:completeTransfer', async (_event, transferId) => {
+  try {
+    return bluetoothService.completeTransfer(transferId);
+  } catch (error) {
+    console.error('[Bluetooth IPC] Complete transfer error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Cancel file transfer
+ipcMain.handle('bluetooth:cancelTransfer', async (_event, transferId) => {
+  try {
+    return bluetoothService.cancelTransfer(transferId);
+  } catch (error) {
+    console.error('[Bluetooth IPC] Cancel transfer error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Receive file via Bluetooth
+ipcMain.handle('bluetooth:receiveFile', async (_event, fileData) => {
+  try {
+    return await bluetoothService.receiveFile(fileData);
+  } catch (error) {
+    console.error('[Bluetooth IPC] Receive file error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get transfer status
+ipcMain.handle('bluetooth:getStatus', async (_event, transferId) => {
+  try {
+    return bluetoothService.getTransferStatus(transferId);
+  } catch (error) {
+    console.error('[Bluetooth IPC] Get status error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get all active transfers
+ipcMain.handle('bluetooth:getActiveTransfers', async () => {
+  try {
+    return bluetoothService.getActiveTransfers();
+  } catch (error) {
+    console.error('[Bluetooth IPC] Get active transfers error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
 // Parse QR code from image file
 ipcMain.handle('verification:parseQRCode', async (_event, imagePath) => {
   try {
@@ -1850,7 +2249,8 @@ ipcMain.handle('conversion:list', async (_event, limit) => {
       return [];
     }
 
-    const history = await conversionService.getConversionHistory(limit || 50);
+    const userId = getCurrentUserId();
+    const history = db.getConversions(limit || 50, userId);
     return history;
   } catch (error) {
     console.error('Error listing conversions:', error);
@@ -1911,7 +2311,8 @@ ipcMain.handle('conversion:getStats', async () => {
       return { total: 0, completed: 0, failed: 0 };
     }
 
-    const stats = await db.getConversionStats();
+    const userId = getCurrentUserId();
+    const stats = await db.getConversionStats(userId);
     return stats;
   } catch (error) {
     console.error('Error getting conversion stats:', error);
@@ -2018,6 +2419,27 @@ ipcMain.handle('dialog:openDirectory', async () => {
   } catch (error) {
     console.error('Error showing directory dialog:', error);
     return { canceled: true, error: error.message };
+  }
+});
+
+// Show item in folder (for opening file location)
+ipcMain.handle('shell:showItemInFolder', async (_event, filePath) => {
+  try {
+    shell.showItemInFolder(filePath);
+    return { success: true };
+  } catch (error) {
+    console.error('Error showing item in folder:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get user home directory
+ipcMain.handle('system:getUserHome', async () => {
+  try {
+    return app.getPath('home');
+  } catch (error) {
+    console.error('Error getting user home:', error);
+    return null;
   }
 });
 

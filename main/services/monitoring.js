@@ -1,11 +1,12 @@
 /**
  * Monitoring Service
  * Collects real-time system metrics: CPU, memory, disk, processes
- * Uses systeminformation and pidusage for accurate data
+ * Uses systeminformation, pidusage, and os-utils for accurate data
  */
 
 const si = require('systeminformation');
 const pidusage = require('pidusage');
+const osUtils = require('os-utils');
 const os = require('os');
 const { exec } = require('child_process');
 const { promisify } = require('util');
@@ -27,6 +28,11 @@ class MonitoringService {
     this.minFetchInterval = 1000; // 1 second minimum (ALL processes need more time)
     this.isProcessFetching = false; // Prevent concurrent fetches
     this.cachedProcessList = []; // Cache last successful fetch
+    this.lastCpuReading = null; // Track last CPU reading for smoothing
+    this.cpuStuckCount = 0; // Counter for consecutive high CPU readings
+    this.isInitialized = false; // Track if first metrics fetch is complete
+    this.cachedStaticMetrics = null; // Cache for expensive static metrics
+    this.lastFullUpdate = 0; // Timestamp of last full metrics update
   }
 
   /**
@@ -35,36 +41,164 @@ class MonitoringService {
    */
   async getSystemMetrics() {
     try {
-      const [cpu, mem, disk, currentLoad, processes, osInfo] = await Promise.all([
-        si.cpu(),
-        si.mem(),
-        si.fsSize(),
-        si.currentLoad(),
-        si.processes(),
-        si.osInfo()
+      console.log('[Monitoring] Fetching system metrics...');
+      
+      // Fetch critical metrics first (fastest queries)
+      const [currentLoad, mem, cpu, osInfo] = await Promise.all([
+        si.currentLoad(),     // Fastest - just reads current CPU
+        si.mem(),             // Fast - memory info
+        si.cpu(),             // Medium - CPU static info (cached by systeminformation)
+        si.osInfo()           // Fast - OS info (cached)
       ]);
+      
+      console.log('[Monitoring] Current CPU load raw value:', currentLoad.currentLoad);
+      console.log('[Monitoring] Current CPU load type:', typeof currentLoad.currentLoad);
+      
+      // Fetch disk with timeout (can be slow on network drives)
+      const diskPromise = si.fsSize();
+      const diskTimeout = new Promise(resolve => 
+        setTimeout(() => {
+          console.log('[Monitoring] Disk fetch timeout after 5s');
+          return resolve([]);
+        }, 5000)
+      );
+      
+      let disk = await Promise.race([diskPromise, diskTimeout]);
+      console.log('[Monitoring] Disk data received:', disk?.length || 0, 'drives');
+      
+      // If no disk data or timeout, try to get at least C: drive
+      if (!disk || disk.length === 0) {
+        console.warn('[Monitoring] No disk data, trying fallback method...');
+        try {
+          disk = await si.fsSize();
+          if (!disk || disk.length === 0) {
+            console.warn('[Monitoring] Fallback also failed, using empty disk array');
+            disk = [];
+          }
+        } catch (diskError) {
+          console.error('[Monitoring] Disk fallback error:', diskError);
+          disk = [];
+        }
+      }
+      
+      // Get process count separately (lightweight, no detailed list)
+      const processCount = await Promise.race([
+        si.processes().then(p => ({
+          all: p.all || 0,
+          running: p.running || 0,
+          blocked: p.blocked || 0,
+          sleeping: p.sleeping || 0
+        })),
+        new Promise(resolve => setTimeout(() => resolve({ all: 0, running: 0, blocked: 0, sleeping: 0 }), 2000))
+      ]).catch(() => ({ all: 0, running: 0, blocked: 0, sleeping: 0 }));
 
       const timestamp = Date.now();
 
-      // CPU metrics
+      // CPU metrics - ENSURE proper number conversion and validation
+      // Clamp CPU values between 0 and 100 to prevent invalid readings
+      const cpuLoadValue = Math.min(100, Math.max(0, parseFloat(currentLoad.currentLoad) || 0));
+      const cpuLoadUserValue = Math.min(100, Math.max(0, parseFloat(currentLoad.currentLoadUser) || 0));
+      const cpuLoadSystemValue = Math.min(100, Math.max(0, parseFloat(currentLoad.currentLoadSystem) || 0));
+      const cpuLoadIdleValue = Math.min(100, Math.max(0, parseFloat(currentLoad.currentLoadIdle) || 0));
+      
+      // If CPU shows 100%, verify with average calculation
+      const avgCoreLoad = currentLoad.cpus ? 
+        currentLoad.cpus.reduce((sum, core) => sum + (parseFloat(core.load) || 0), 0) / currentLoad.cpus.length : cpuLoadValue;
+      
+      // Detect if CPU reading is stuck at 100%
+      if (cpuLoadValue >= 99) {
+        this.cpuStuckCount++;
+        if (this.cpuStuckCount <= 3) {
+          console.warn('[Monitoring] ⚠️ High CPU detected:', cpuLoadValue.toFixed(2) + '% (count:', this.cpuStuckCount, ')');
+        }
+      } else {
+        if (this.cpuStuckCount > 0) {
+          console.log('[Monitoring] ✅ CPU back to normal, resetting stuck counter');
+        }
+        this.cpuStuckCount = 0;
+      }
+      
+      // Use the more accurate value between overall and average
+      let actualCpuLoad = cpuLoadValue;
+      
+      // If reported at 100% but cores show significantly lower, trust cores
+      if (cpuLoadValue === 100 && avgCoreLoad < 95) {
+        actualCpuLoad = avgCoreLoad;
+        console.log('[Monitoring] ✅ Using core average', avgCoreLoad.toFixed(2) + '% instead of 100%');
+      }
+      
+      console.log('[Monitoring] Raw CPU load:', cpuLoadValue.toFixed(2) + '%, Average cores:', avgCoreLoad.toFixed(2) + '%, Using:', actualCpuLoad.toFixed(2) + '%');
+      
+      // Use os-utils for a quick CPU sample (measures over ~1 second internally)
+      const osUtilsCpuPromise = new Promise((resolve) => {
+        osUtils.cpuUsage((usage) => {
+          resolve(Math.round(usage * 10000) / 100); // Round to 2 decimals
+        });
+      });
+      
+      // Get os-utils reading with 1 second timeout
+      let osUtilsCpu = await Promise.race([
+        osUtilsCpuPromise,
+        new Promise(resolve => setTimeout(() => resolve(null), 1100))
+      ]);
+      
+      // Final CPU value logic:
+      let finalCpuLoad;
+      
+      if (osUtilsCpu !== null) {
+        // os-utils succeeded - use a weighted average for smoother readings
+        console.log('[Monitoring] systeminformation:', actualCpuLoad.toFixed(2) + '%, os-utils:', osUtilsCpu.toFixed(2) + '%');
+        
+        // If both agree (within 15%), trust systeminformation (it's faster)
+        if (Math.abs(actualCpuLoad - osUtilsCpu) <= 15) {
+          finalCpuLoad = actualCpuLoad;
+        } 
+        // If they disagree significantly, use weighted average (70% os-utils, 30% systeminformation)
+        else {
+          finalCpuLoad = (osUtilsCpu * 0.7) + (actualCpuLoad * 0.3);
+          console.log('[Monitoring] Large difference detected, using weighted average:', finalCpuLoad.toFixed(2) + '%');
+        }
+      } else {
+        // os-utils timed out, use systeminformation
+        console.log('[Monitoring] os-utils timeout, using systeminformation:', actualCpuLoad.toFixed(2) + '%');
+        finalCpuLoad = actualCpuLoad;
+      }
+      
+      // Apply smoothing if we have previous reading to prevent jumpy values
+      if (this.lastCpuReading !== null) {
+        const smoothingFactor = 0.3; // 30% of new value, 70% of old (smoother)
+        const smoothedCpu = (finalCpuLoad * smoothingFactor) + (this.lastCpuReading * (1 - smoothingFactor));
+        console.log('[Monitoring] Smoothed CPU:', smoothedCpu.toFixed(2) + '% (raw:', finalCpuLoad.toFixed(2) + '%)');
+        finalCpuLoad = smoothedCpu;
+      }
+      
+      finalCpuLoad = Math.round(finalCpuLoad * 100) / 100; // Round to 2 decimals
+      this.lastCpuReading = finalCpuLoad;
+      
       const cpuMetrics = {
         manufacturer: cpu.manufacturer,
         brand: cpu.brand,
         cores: cpu.cores,
         physicalCores: cpu.physicalCores,
         speed: cpu.speed,
-        currentLoad: currentLoad.currentLoad.toFixed(2),
-        currentLoadUser: currentLoad.currentLoadUser.toFixed(2),
-        currentLoadSystem: currentLoad.currentLoadSystem.toFixed(2),
-        currentLoadIdle: currentLoad.currentLoadIdle.toFixed(2),
+        currentLoad: finalCpuLoad.toFixed(2),
+        currentLoadUser: cpuLoadUserValue.toFixed(2),
+        currentLoadSystem: cpuLoadSystemValue.toFixed(2),
+        currentLoadIdle: cpuLoadIdleValue.toFixed(2),
         coresLoad: currentLoad.cpus.map(core => ({
-          load: core.load.toFixed(2),
-          loadUser: core.loadUser.toFixed(2),
-          loadSystem: core.loadSystem.toFixed(2)
+          load: Math.min(100, Math.max(0, parseFloat(core.load) || 0)).toFixed(2),
+          loadUser: Math.min(100, Math.max(0, parseFloat(core.loadUser) || 0)).toFixed(2),
+          loadSystem: Math.min(100, Math.max(0, parseFloat(core.loadSystem) || 0)).toFixed(2)
         }))
       };
 
-      // Memory metrics
+      // Memory metrics - ENSURE proper calculation with proper rounding
+      const memUsedValue = parseInt(mem.used) || 0;
+      const memTotalValue = parseInt(mem.total) || 1; // Avoid division by zero
+      const memUsagePercent = Math.round(((memUsedValue / memTotalValue) * 100) * 100) / 100; // Round to 2 decimals
+      
+      console.log('[Monitoring] Memory usage:', memUsagePercent.toFixed(2) + '%');
+      
       const memoryMetrics = {
         total: mem.total,
         free: mem.free,
@@ -74,27 +208,40 @@ class MonitoringService {
         swapTotal: mem.swaptotal,
         swapUsed: mem.swapused,
         swapFree: mem.swapfree,
-        usagePercent: ((mem.used / mem.total) * 100).toFixed(2)
+        usagePercent: memUsagePercent.toFixed(2)
       };
 
-      // Disk metrics
-      const diskMetrics = disk.map(d => ({
-        fs: d.fs,
-        type: d.type,
-        size: d.size,
-        used: d.used,
-        available: d.available,
-        use: d.use,
-        mount: d.mount
-      }));
+      // Disk metrics - ENSURE proper data structure
+      const diskMetrics = disk.map(d => {
+        const diskUseValue = parseFloat(d.use) || 0;
+        console.log(`[Monitoring] Disk ${d.fs}: ${diskUseValue.toFixed(2)}% used`);
+        return {
+          fs: d.fs,
+          type: d.type,
+          size: parseInt(d.size) || 0,
+          used: parseInt(d.used) || 0,
+          available: parseInt(d.available) || 0,
+          use: diskUseValue.toFixed(2),
+          mount: d.mount
+        };
+      });
+      
+      // If no disk data at all, provide a placeholder
+      if (diskMetrics.length === 0) {
+        console.warn('[Monitoring] No disk metrics available, using placeholder');
+        diskMetrics.push({
+          fs: 'N/A',
+          type: 'unknown',
+          size: 0,
+          used: 0,
+          available: 0,
+          use: '0.00',
+          mount: 'N/A'
+        });
+      }
 
-      // Process metrics
-      const processMetrics = {
-        all: processes.all,
-        running: processes.running,
-        blocked: processes.blocked,
-        sleeping: processes.sleeping
-      };
+      // Process metrics (lightweight count only)
+      const processMetrics = processCount;
 
       // System info
       const systemInfo = {
@@ -106,8 +253,19 @@ class MonitoringService {
         uptime: os.uptime()
       };
 
-      // Store in history
-      this.addToHistory(cpuMetrics.currentLoad, memoryMetrics.usagePercent, diskMetrics[0]?.use || 0, timestamp);
+      // Store in history - use numeric values for proper charting
+      const diskUseForHistory = parseFloat(diskMetrics[0]?.use) || 0;
+      this.addToHistory(finalCpuLoad, memUsagePercent, diskUseForHistory, timestamp);
+      
+      console.log('[Monitoring] History updated - CPU:', finalCpuLoad.toFixed(2) + '%, Memory:', memUsagePercent.toFixed(2) + '%, Disk:', diskUseForHistory.toFixed(2) + '%');
+      console.log('[Monitoring] History size:', this.metricsHistory.cpu.length, 'data points');
+      console.log('[Monitoring] Last 3 CPU readings:', this.metricsHistory.cpu.slice(-3).map(v => v.toFixed(2)).join('%, ') + '%');
+
+      // Mark as initialized after first successful fetch
+      if (!this.isInitialized) {
+        this.isInitialized = true;
+        console.log('[Monitoring] ✅ Monitoring service initialized successfully');
+      }
 
       return {
         cpu: cpuMetrics,
@@ -119,7 +277,7 @@ class MonitoringService {
         history: this.metricsHistory
       };
     } catch (error) {
-      console.error('Error getting system metrics:', error);
+      console.error('[Monitoring] Error getting system metrics:', error);
       throw error;
     }
   }
@@ -336,10 +494,17 @@ class MonitoringService {
    * @private
    */
   addToHistory(cpuLoad, memoryUsage, diskUsage, timestamp) {
-    this.metricsHistory.cpu.push(parseFloat(cpuLoad));
-    this.metricsHistory.memory.push(parseFloat(memoryUsage));
-    this.metricsHistory.disk.push(parseFloat(diskUsage));
+    // Ensure all values are proper numbers, not strings
+    const cpuValue = typeof cpuLoad === 'number' ? cpuLoad : parseFloat(cpuLoad) || 0;
+    const memValue = typeof memoryUsage === 'number' ? memoryUsage : parseFloat(memoryUsage) || 0;
+    const diskValue = typeof diskUsage === 'number' ? diskUsage : parseFloat(diskUsage) || 0;
+    
+    this.metricsHistory.cpu.push(cpuValue);
+    this.metricsHistory.memory.push(memValue);
+    this.metricsHistory.disk.push(diskValue);
     this.metricsHistory.timestamps.push(timestamp);
+    
+    console.log('[History] Added data point - CPU:', cpuValue.toFixed(2), 'Memory:', memValue.toFixed(2), 'Disk:', diskValue.toFixed(2));
 
     // Keep only last N entries
     if (this.metricsHistory.cpu.length > this.maxHistorySize) {
@@ -347,6 +512,7 @@ class MonitoringService {
       this.metricsHistory.memory.shift();
       this.metricsHistory.disk.shift();
       this.metricsHistory.timestamps.shift();
+      console.log('[History] Trimmed to max size:', this.maxHistorySize);
     }
   }
 
