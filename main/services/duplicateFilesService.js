@@ -564,7 +564,7 @@ class DuplicateFilesService {
           duplicateGroups: stats.duplicateGroups,
           totalDuplicates: stats.totalDuplicates,
           wastedSpace: stats.totalWastedSpace,
-          directories: directories.length
+          directories: dirPaths.length
         }, userId);
       }
 
@@ -578,7 +578,7 @@ class DuplicateFilesService {
         const userId = this.getUserId ? this.getUserId() : null;
         await this.logsService.error('Duplicate files scan failed', 'duplicate_scan', {
           error: error.message,
-          directories: directories.length
+          directories: dirPaths.length
         }, userId);
       }
       

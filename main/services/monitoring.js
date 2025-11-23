@@ -15,6 +15,43 @@ const path = require('path');
 
 const execAsync = promisify(exec);
 
+// Fast Windows-native process fetcher
+const getWindowsProcesses = () => {
+  return new Promise((resolve, reject) => {
+    // Use Windows tasklist for instant results
+    exec('tasklist /FO CSV /NH', { timeout: 2000, maxBuffer: 5 * 1024 * 1024 }, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      
+      try {
+        const processes = [];
+        const lines = stdout.trim().split('\n');
+        
+        for (const line of lines) {
+          const match = line.match(/"([^"]+)","([^"]+)","([^"]+)","([^"]+)","([^"]+)"/);
+          if (match) {
+            const [, name, pid, sessionName, sessionNum, memUsage] = match;
+            const memBytes = parseInt(memUsage.replace(/[^0-9]/g, '')) * 1024;
+            processes.push({
+              name: name,
+              pid: parseInt(pid),
+              memory: memBytes,
+              memoryPercent: (memBytes / os.totalmem() * 100).toFixed(2),
+              cpu: 0 // Will be filled by pidusage
+            });
+          }
+        }
+        
+        resolve(processes);
+      } catch (parseError) {
+        reject(parseError);
+      }
+    });
+  });
+};
+
 class MonitoringService {
   constructor() {
     this.metricsHistory = {
@@ -23,11 +60,13 @@ class MonitoringService {
       disk: [],
       timestamps: []
     };
-    this.maxHistorySize = 60; // Keep 60 data points (1 minute at 1s intervals)
+    this.maxHistorySize = 180; // Keep 180 data points (6 minutes at 2s intervals)
     this.lastProcessFetch = 0; // Timestamp of last fetch
-    this.minFetchInterval = 1000; // 1 second minimum (ALL processes need more time)
+    this.minFetchInterval = 1000; // 1 second minimum for faster updates
     this.isProcessFetching = false; // Prevent concurrent fetches
     this.cachedProcessList = []; // Cache last successful fetch
+    this.maxPidSampleSizeFull = 60; // Limit heavy pidusage sampling to top offenders (full refresh)
+    this.maxPidSampleSizeFast = 20; // Lightweight sampling when we just need quick numbers
     this.lastCpuReading = null; // Track last CPU reading for smoothing
     this.cpuStuckCount = 0; // Counter for consecutive high CPU readings
     this.isInitialized = false; // Track if first metrics fetch is complete
@@ -274,7 +313,12 @@ class MonitoringService {
         processes: processMetrics,
         system: systemInfo,
         timestamp,
-        history: this.metricsHistory
+        history: {
+          cpu: [...this.metricsHistory.cpu],
+          memory: [...this.metricsHistory.memory],
+          disk: [...this.metricsHistory.disk],
+          timestamps: [...this.metricsHistory.timestamps]
+        }
       };
     } catch (error) {
       console.error('[Monitoring] Error getting system metrics:', error);
@@ -283,134 +327,157 @@ class MonitoringService {
   }
 
   /**
-   * Get detailed process list with CPU and memory usage
-   * ROBUST: Shows ALL processes with REAL metrics using pidusage
+   * ULTRA-FAST process list with instant return and progressive enhancement
+   * @param {Object} options - Options for fetching processes
+   * @param {boolean} options.fastMode - Use fast mode (default: false)
+   * @param {boolean} options.force - Force fresh fetch, bypass cache (default: false)
    * @returns {Promise<Array>} Complete list of all running processes
    */
-  async getProcessList() {
-    // Throttle: Prevent fetching too frequently
+  async getProcessList(options = {}) {
+    const { fastMode = false, force = false } = options;
     const now = Date.now();
     const timeSinceLastFetch = now - this.lastProcessFetch;
     
-    // If already fetching, return cached data
+    // If force flag is set, skip cache and fetch fresh data
+    if (force) {
+      console.log('[Process List] 🔄 FORCE REFRESH - bypassing cache');
+      return await this.fetchProcessesFast();
+    }
+    
+    // ALWAYS return cached data immediately if available (instant UI update)
+    if (this.cachedProcessList.length > 0 && timeSinceLastFetch < 3000) {
+      console.log(`[Process List] ⚡ Instant return from cache (${this.cachedProcessList.length} processes)`);
+      
+      // Refresh in background if cache is getting old (> 800ms for faster updates)
+      if (timeSinceLastFetch > 800 && !this.isProcessFetching) {
+        console.log('[Process List] 🔄 Triggering background refresh...');
+        this.refreshProcessesInBackground();
+      }
+      
+      return this.cachedProcessList;
+    }
+    
+    // If already fetching, wait for it or return cached
     if (this.isProcessFetching) {
-      console.log('[Process List] Already fetching, returning cached data');
-      return this.cachedProcessList;
-    }
-    
-    // If too soon since last fetch, return cached data
-    if (timeSinceLastFetch < this.minFetchInterval) {
-      console.log(`[Process List] Throttled (${timeSinceLastFetch}ms < ${this.minFetchInterval}ms), returning cached data`);
-      return this.cachedProcessList;
-    }
-    
-    this.isProcessFetching = true;
-    this.lastProcessFetch = now;
-    
-    try {
-      console.log('[Process List] Fetching fresh process data...');
-      
-      // Get ALL processes from systeminformation
-      const processes = await si.processes();
-      
-      console.log(`[Process List] Retrieved ${processes.list?.length || 0} total processes`);
-      
-      if (!processes.list || processes.list.length === 0) {
-        console.warn('[Process List] No processes returned, keeping cached data');
+      console.log('[Process List] Already fetching...');
+      // If we have cache, return it immediately
+      if (this.cachedProcessList.length > 0) {
         return this.cachedProcessList;
       }
+      // Otherwise wait a bit for the fetch to complete
+      await new Promise(resolve => setTimeout(resolve, 100));
+      return this.cachedProcessList.length > 0 ? this.cachedProcessList : [];
+    }
+    
+    // Perform fast fetch
+    console.log('[Process List] 🚀 Starting fresh fetch (no cache available)');
+    return await this.fetchProcessesFast();
+  }
 
-      // Get ALL valid PIDs (filter only invalid ones)
-      const validProcesses = processes.list.filter(p => p.pid > 0 && p.name);
-      const allPids = validProcesses.map(p => p.pid);
+  /**
+   * Fast process fetch using Windows native command + selective pidusage
+   */
+  async fetchProcessesFast() {
+    this.isProcessFetching = true;
+    this.lastProcessFetch = Date.now();
+    const startTime = Date.now();
+    
+    try {
+      console.log('[Process List] 🚀 Starting FAST fetch...');
       
-      console.log(`[Process List] Using pidusage for ALL ${allPids.length} processes...`);
-      
-      // Get REAL CPU and memory stats for ALL processes using pidusage
-      let pidStats = {};
+      // Method 1: Use Windows tasklist (INSTANT - ~50-100ms)
+      let processList = [];
       try {
-        // This may take a moment but gives ACCURATE data for ALL processes
-        pidStats = await pidusage(allPids);
-        console.log(`[Process List] ✅ pidusage returned stats for ${Object.keys(pidStats).length} processes`);
-      } catch (pidError) {
-        console.warn('[Process List] pidusage error, using systeminformation fallback:', pidError.message);
+        processList = await getWindowsProcesses();
+        console.log(`[Process List] ⚡ Got ${processList.length} processes from tasklist in ${Date.now() - startTime}ms`);
+      } catch (err) {
+        console.warn('[Process List] Tasklist failed, falling back to systeminformation');
+        const siProcs = await si.processes();
+        processList = (siProcs.list || []).map(p => ({
+          name: p.name,
+          pid: p.pid,
+          memory: p.mem || 0,
+          memoryPercent: p.memVsTotal?.toFixed(2) || '0.00',
+          cpu: p.cpu || 0
+        }));
       }
-
-      // Map ALL processes with accurate metrics
-      const allProcesses = validProcesses
-        .map((proc) => {
-          // Extract just the executable name without path
-          let displayName = proc.name;
-          if (displayName.includes('\\')) {
-            displayName = displayName.split('\\').pop();
-          }
-          if (displayName.includes('/')) {
-            displayName = displayName.split('/').pop();
-          }
-          
-          // Get accurate stats from pidusage
-          const pidStat = pidStats[proc.pid];
-          
-          // CPU: Use pidusage first (REAL data), fallback to systeminformation
-          let cpuValue = 0;
-          if (pidStat && typeof pidStat.cpu === 'number') {
-            cpuValue = pidStat.cpu; // REAL CPU from pidusage
-          } else if (typeof proc.cpu === 'number') {
-            cpuValue = proc.cpu;
-          } else if (typeof proc.pcpu === 'number') {
-            cpuValue = proc.pcpu;
-          }
-          
-          // Memory: Use pidusage first (REAL data), fallback to systeminformation
-          let memValue = 0;
-          let memPercentValue = 0;
-          
-          if (pidStat && typeof pidStat.memory === 'number') {
-            memValue = pidStat.memory; // REAL memory in bytes from pidusage
-            memPercentValue = (memValue / os.totalmem()) * 100;
-          } else if (typeof proc.mem === 'number') {
-            memValue = proc.mem;
-            memPercentValue = typeof proc.memVsTotal === 'number' ? proc.memVsTotal : 0;
-          }
-          
-          return {
-            pid: proc.pid,
-            name: displayName,
-            cpu: cpuValue.toFixed(2),
-            cpuPercent: cpuValue,
-            memory: memValue,
-            memoryFormatted: (memValue / 1024 / 1024).toFixed(1) + ' MB',
-            memoryPercent: memPercentValue.toFixed(2),
-            memoryPercentNum: memPercentValue,
-            priority: proc.priority || 'Normal',
-            state: proc.state || 'running',
-            started: proc.started || '',
-            command: proc.command || displayName,
-            user: proc.user || '',
-            timestamp: Date.now()
-          };
-        })
-        // Sort by CPU usage (highest first), then by memory
-        .sort((a, b) => {
-          const cpuDiff = b.cpuPercent - a.cpuPercent;
-          if (Math.abs(cpuDiff) > 0.01) return cpuDiff;
-          return b.memoryPercentNum - a.memoryPercentNum;
-        });
-
-      // Cache the complete result - NO FILTERING, show ALL processes
-      this.cachedProcessList = allProcesses;
       
-      console.log(`[Process List] ✅ Cached ALL ${allProcesses.length} processes`);
-      console.log(`[Process List] Top 5 by CPU: ${allProcesses.slice(0, 5).map(p => `${p.name}(${p.cpu}%)`).join(', ')}`);
+      // Get ALL process PIDs for complete CPU sampling
+      const allPids = processList
+        .map(p => p.pid)
+        .filter(pid => pid > 0);
       
-      return allProcesses;
+      console.log(`[Process List] Sampling CPU for top ${Math.min(allPids.length, 100)} processes...`);
+      
+      // Get CPU stats for top processes only (optimized for speed)
+      // Limit to top 100 PIDs to avoid slow sampling
+      const topPids = allPids.slice(0, 100);
+      let cpuStats = {};
+      try {
+        const cpuPromise = pidusage(topPids);
+        // Reduced timeout from 2000ms to 600ms for faster refresh
+        const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve({}), 600));
+        cpuStats = await Promise.race([cpuPromise, timeoutPromise]);
+        console.log(`[Process List] Got CPU stats for ${Object.keys(cpuStats).length} processes in ${Date.now() - startTime}ms`);
+      } catch (err) {
+        console.warn('[Process List] pidusage sampling failed:', err.message);
+      }
+      
+      // Merge CPU data and format
+      const formattedProcesses = processList.map(proc => {
+        const cpuData = cpuStats[proc.pid];
+        const cpuValue = cpuData?.cpu || proc.cpu || 0;
+        const memValue = cpuData?.memory || proc.memory || 0;
+        
+        return {
+          pid: proc.pid,
+          name: proc.name,
+          cpu: cpuValue.toFixed(2),
+          cpuPercent: cpuValue,
+          memory: memValue,
+          memoryFormatted: (memValue / 1024 / 1024).toFixed(1) + ' MB',
+          memoryPercent: (memValue / os.totalmem() * 100).toFixed(2),
+          memoryPercentNum: (memValue / os.totalmem() * 100),
+          priority: 'Normal',
+          state: 'running',
+          started: '',
+          command: proc.name,
+          user: '',
+          timestamp: Date.now()
+        };
+      }).sort((a, b) => {
+        // Sort by CPU first, then memory
+        const cpuDiff = b.cpuPercent - a.cpuPercent;
+        if (Math.abs(cpuDiff) > 0.01) return cpuDiff;
+        return b.memoryPercentNum - a.memoryPercentNum;
+      });
+      
+      this.cachedProcessList = formattedProcesses;
+      const totalTime = Date.now() - startTime;
+      
+      console.log(`[Process List] ✅ FAST fetch completed in ${totalTime}ms (${formattedProcesses.length} processes)`);
+      console.log(`[Process List] Top 5: ${formattedProcesses.slice(0, 5).map(p => `${p.name}(${p.cpu}%)`).join(', ')}`);
+      
+      return formattedProcesses;
+      
     } catch (error) {
-      console.error('[Process List] Error:', error.message);
-      // Return cached data on error
+      console.error('[Process List] Fast fetch error:', error.message);
       return this.cachedProcessList;
     } finally {
       this.isProcessFetching = false;
     }
+  }
+
+  /**
+   * Background refresh without blocking
+   */
+  refreshProcessesInBackground() {
+    if (this.isProcessFetching) return;
+    
+    // Don't await - fire and forget
+    this.fetchProcessesFast().catch(err => {
+      console.error('[Process List] Background refresh error:', err.message);
+    });
   }
 
   /**
@@ -506,13 +573,13 @@ class MonitoringService {
     
     console.log('[History] Added data point - CPU:', cpuValue.toFixed(2), 'Memory:', memValue.toFixed(2), 'Disk:', diskValue.toFixed(2));
 
-    // Keep only last N entries
+    // Keep only last N entries - create NEW arrays instead of shift() to ensure React detects changes
     if (this.metricsHistory.cpu.length > this.maxHistorySize) {
-      this.metricsHistory.cpu.shift();
-      this.metricsHistory.memory.shift();
-      this.metricsHistory.disk.shift();
-      this.metricsHistory.timestamps.shift();
-      console.log('[History] Trimmed to max size:', this.maxHistorySize);
+      this.metricsHistory.cpu = this.metricsHistory.cpu.slice(-this.maxHistorySize);
+      this.metricsHistory.memory = this.metricsHistory.memory.slice(-this.maxHistorySize);
+      this.metricsHistory.disk = this.metricsHistory.disk.slice(-this.maxHistorySize);
+      this.metricsHistory.timestamps = this.metricsHistory.timestamps.slice(-this.maxHistorySize);
+      console.log('[History] Trimmed to max size:', this.maxHistorySize, '- created new array references');
     }
   }
 

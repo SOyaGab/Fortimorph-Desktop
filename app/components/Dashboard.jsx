@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
+const MAX_CHART_POINTS = 180; // Keep roughly six minutes of data on screen
+const formatTimeLabel = (timestamp) =>
+  new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
 // Lazy load heavy components to improve performance
 const LogsViewer = lazy(() => import('./LogsViewer'));
 const BatteryCenter = lazy(() => import('./BatteryCenter'));
@@ -14,11 +18,12 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(false); // Changed to false for instant UI
   const [error, setError] = useState(null);
   const [selectedView, setSelectedView] = useState('overview'); // overview, cpu, memory, processes, storage, files, logs, battery
-  const [autoRefresh, setAutoRefresh] = useState(true); // Enable/disable auto-refresh
+  const [autoRefresh, setAutoRefresh] = useState(true); // Enable/disable auto-refresh - DEFAULT ON for real-time updates
   const refreshInterval = 2000; // 2 seconds for smooth real-time updates
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
   const [lastUpdateTime, setLastUpdateTime] = useState(Date.now());
+  const [currentTime, setCurrentTime] = useState(Date.now()); // Track current time for live uptime
   const [installedApps, setInstalledApps] = useState([]);
   const [storageAnalysis, setStorageAnalysis] = useState(null);
   const [isLoadingApps, setIsLoadingApps] = useState(false);
@@ -65,89 +70,108 @@ const Dashboard = () => {
       console.log('[Dashboard] Fetching metrics...');
       setIsFetching(true);
       const result = await window.electronAPI.system.getMetrics();
-      if (result.success) {
-        console.log('[Dashboard] Metrics received - CPU:', result.data.cpu.currentLoad + '%', 
-                    'Memory:', result.data.memory.usagePercent + '%', 
-                    'Disk:', result.data.disk[0]?.use + '%',
-                    'History points:', result.data.history.timestamps.length);
+      if (result.success && result.data) {
+        // Validate that we have meaningful data (not all zeros)
+        const cpuValid = result.data.cpu && parseFloat(result.data.cpu.currentLoad) >= 0;
+        const memValid = result.data.memory && parseFloat(result.data.memory.usagePercent) >= 0;
+        const hasValidData = cpuValid && memValid;
         
-        // Force a new object reference to ensure React detects the change
-        setMetrics({
-          ...result.data,
-          timestamp: Date.now() // Add unique timestamp to force updates
-        });
-        setLastUpdateTime(Date.now());
-        setError(null);
+        if (hasValidData) {
+          console.log('[Dashboard] Metrics received - CPU:', result.data.cpu.currentLoad + '%', 
+                      'Memory:', result.data.memory.usagePercent + '%', 
+                      'Disk:', result.data.disk[0]?.use + '%',
+                      'History points:', result.data.history.timestamps.length);
+          
+          // Force NEW object references at every level to ensure React detects changes
+          setMetrics({
+            cpu: { ...result.data.cpu },
+            memory: { ...result.data.memory },
+            disk: [...result.data.disk],
+            processes: { ...result.data.processes },
+            system: { ...result.data.system },
+            timestamp: Date.now(),
+            history: {
+              cpu: [...result.data.history.cpu],
+              memory: [...result.data.history.memory],
+              disk: [...result.data.history.disk],
+              timestamps: [...result.data.history.timestamps]
+            }
+          });
+          setLastUpdateTime(Date.now());
+          setError(null);
+        } else {
+          console.warn('[Dashboard] Invalid metrics data received, keeping previous values');
+          // Don't update if data is invalid - keep showing last good values
+        }
       } else {
         throw new Error(result.error || 'Failed to fetch metrics');
       }
     } catch (error) {
       console.error('[Dashboard] Error fetching metrics:', error);
-      setError(error.message);
+      // Only set error if we don't have any metrics yet
+      if (!metrics) {
+        setError(error.message);
+      }
     } finally {
       setIsFetching(false);
     }
   };
 
-  // Fetch process list (manual refresh)
+  // Fetch process list (manual refresh) - SIMPLE AND FAST
   const fetchProcesses = async () => {
+    if (isRefreshingProcesses) return; // Prevent double-click
+    
     setIsRefreshingProcesses(true);
+    console.log('🔄 Manual refresh clicked');
+    
     try {
-      const result = await window.electronAPI.system.getProcesses();
-      if (result.success) {
+      // Add timeout to prevent hanging
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Timeout')), 5000)
+      );
+      
+      const resultPromise = window.electronAPI.system.getProcesses({ force: true });
+      const result = await Promise.race([resultPromise, timeoutPromise]);
+      
+      console.log('✅ Refresh result:', result.success, result.data?.length);
+      
+      if (result.success && result.data) {
         setProcesses(result.data);
       }
     } catch (error) {
-      console.error('Error fetching processes:', error);
+      console.error('❌ Error fetching processes:', error);
     } finally {
-      // Always reset the loading state after a short delay
-      setTimeout(() => setIsRefreshingProcesses(false), 500);
+      setIsRefreshingProcesses(false);
+      console.log('✅ Refresh complete');
     }
   };
 
-  // Real-time process streaming when Processes tab is active
+  // Load processes when Processes tab is selected - INSTANT with cache, then stream updates
   useEffect(() => {
     if (selectedView !== 'processes') {
-      // Stop streaming when leaving processes view
-      window.electronAPI.system.stopProcessStream().catch(err => 
-        console.error('Error stopping stream:', err)
-      );
       return;
     }
     
-    console.log('📋 Processes view selected - starting real-time stream');
+    console.log('📋 Processes view selected');
     
-    // Set up listener for process updates
-    const handleProcessUpdate = (result) => {
-      if (result.success) {
-        setProcesses(result.data);
-        // Don't set isRefreshingProcesses here - only for manual refresh
-      } else {
-        console.error('Process update error:', result.error);
+    // Load cached data immediately for instant display
+    const loadInitialProcesses = async () => {
+      try {
+        // Always fetch fresh data when entering processes view for accurate display
+        const result = await window.electronAPI.system.getProcesses({ force: true });
+        if (result.success && result.data && result.data.length > 0) {
+          console.log('⚡ Got initial processes:', result.data.length);
+          setProcesses(result.data);
+        } else {
+          console.log('⚠️ No processes returned, will try stream');
+        }
+      } catch (error) {
+        console.error('Error loading initial processes:', error);
       }
     };
     
-    window.electronAPI.system.onProcessUpdate(handleProcessUpdate);
-    
-    // Start the stream
-    window.electronAPI.system.startProcessStream()
-      .then(result => {
-        if (result.success) {
-          console.log('✅ Process stream started');
-        }
-      })
-      .catch(error => {
-        console.error('❌ Failed to start process stream:', error);
-      });
-    
-    // Cleanup function
-    return () => {
-      console.log('🛑 Stopping process stream');
-      window.electronAPI.system.stopProcessStream().catch(err => 
-        console.error('Error in cleanup:', err)
-      );
-      window.electronAPI.system.removeProcessUpdateListener();
-    };
+    // Execute immediately
+    loadInitialProcesses();
   }, [selectedView]);
 
   // Fetch optimization suggestions
@@ -268,6 +292,15 @@ const Dashboard = () => {
 
     return () => clearInterval(interval);
   }, [refreshInterval, loading, isFetching, autoRefresh]);
+
+  // Update current time every second for real-time uptime display
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(Date.now());
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, []);
   
   // Real-time process streaming when Processes tab is active
   useEffect(() => {
@@ -283,11 +316,12 @@ const Dashboard = () => {
     
     // Set up listener for process updates
     const handleProcessUpdate = (result) => {
-      if (result.success) {
+      if (result.success && result.data && Array.isArray(result.data) && result.data.length > 0) {
+        // Only update if we have valid process data
         setProcesses(result.data);
         // Don't set isRefreshingProcesses here - only for manual refresh
       } else {
-        console.error('Process update error:', result.error);
+        console.error('Process update error:', result.error || 'Invalid or empty data');
       }
     };
     
@@ -523,34 +557,34 @@ const Dashboard = () => {
     return `${minutes}m`;
   };
 
-  // Prepare chart data with memoization - recalculate when metrics updates
+  const latestHistoryTimestamp = metrics?.history?.timestamps?.length
+    ? metrics.history.timestamps[metrics.history.timestamps.length - 1]
+    : null;
+
+  // Prepare chart data with memoization - only keep recent points for performance
   const chartData = useMemo(() => {
     if (!metrics?.history?.timestamps || metrics.history.timestamps.length === 0) {
-      console.log('[Dashboard] No chart data available yet');
       return [];
     }
-    
+
     const { cpu, memory, timestamps } = metrics.history;
-    
-    console.log('[Dashboard] Building chart data with', timestamps.length, 'data points');
-    console.log('[Dashboard] Latest values - CPU:', cpu[cpu.length - 1]?.toFixed(2) + '%', 
-                'Memory:', memory[memory.length - 1]?.toFixed(2) + '%');
-    
-    // Pre-calculate all timestamps at once for better performance
-    const data = timestamps.map((timestamp, index) => {
-      const cpuVal = typeof cpu[index] === 'number' ? cpu[index] : parseFloat(cpu[index]) || 0;
-      const memVal = typeof memory[index] === 'number' ? memory[index] : parseFloat(memory[index]) || 0;
-      
-      return {
-        time: new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        cpu: Math.round(cpuVal * 100) / 100, // Ensure 2 decimal precision
-        memory: Math.round(memVal * 100) / 100, // Ensure 2 decimal precision
-      };
-    });
-    
-    console.log('[Dashboard] Chart data built successfully with', data.length, 'points');
+    const startIndex = Math.max(0, timestamps.length - MAX_CHART_POINTS);
+
+    const data = [];
+    for (let i = startIndex; i < timestamps.length; i++) {
+      const cpuVal = typeof cpu[i] === 'number' ? cpu[i] : parseFloat(cpu[i]) || 0;
+      const memVal = typeof memory[i] === 'number' ? memory[i] : parseFloat(memory[i]) || 0;
+
+      data.push({
+        time: formatTimeLabel(timestamps[i]),
+        timestamp: timestamps[i],
+        cpu: Math.round(cpuVal * 100) / 100,
+        memory: Math.round(memVal * 100) / 100,
+      });
+    }
+
     return data;
-  }, [metrics?.timestamp, metrics?.history?.timestamps?.length]);
+  }, [metrics?.history?.timestamps?.length, latestHistoryTimestamp]);
 
   // Memoize filtered processes to avoid recalculation on every render
   const filteredProcesses = useMemo(() => {
@@ -567,12 +601,14 @@ const Dashboard = () => {
     });
   }, [processes, debouncedSearchTerm]); // Use debouncedSearchTerm
 
-  // Memoize displayed processes for the table
+  // Memoize displayed processes for the table (optimized for performance)
   const displayedProcesses = useMemo(() => {
     if (debouncedSearchTerm) {
-      return filteredProcesses; // Show all matching when searching
+      // When searching, limit to first 50 results for performance
+      return filteredProcesses.slice(0, 50);
     }
-    return showAllProcesses ? filteredProcesses : filteredProcesses.slice(0, 20);
+    // Default: show only top 20 processes unless explicitly requested
+    return showAllProcesses ? filteredProcesses.slice(0, 100) : filteredProcesses.slice(0, 20);
   }, [filteredProcesses, showAllProcesses, debouncedSearchTerm]);
 
   // No more full-screen loading - show UI immediately with loading indicators
@@ -713,7 +749,7 @@ const Dashboard = () => {
               <div className="text-[#FFC300] text-sm font-semibold mb-2">CPU USAGE</div>
               {metrics ? (
                 <>
-                  <div className="text-white text-4xl font-bold mb-2">
+                  <div key={metrics.timestamp} className="text-white text-4xl font-bold mb-2">
                     {metrics.cpu.currentLoad}%
                   </div>
                   <div className="text-gray-400 text-sm">{metrics.cpu.brand}</div>
@@ -733,7 +769,7 @@ const Dashboard = () => {
               <div className="text-[#FFC300] text-sm font-semibold mb-2">MEMORY USAGE</div>
               {metrics ? (
                 <>
-                  <div className="text-white text-4xl font-bold mb-2">
+                  <div key={metrics.timestamp} className="text-white text-4xl font-bold mb-2">
                     {metrics.memory.usagePercent}%
                   </div>
                   <div className="text-gray-400 text-sm">
@@ -753,7 +789,7 @@ const Dashboard = () => {
               <div className="text-[#FFC300] text-sm font-semibold mb-2">DISK USAGE</div>
               {metrics ? (
                 <>
-                  <div className="text-white text-4xl font-bold mb-2">
+                  <div key={metrics.timestamp} className="text-white text-4xl font-bold mb-2">
                     {metrics.disk[0]?.use || 0}%
                   </div>
                   <div className="text-gray-400 text-sm">
@@ -811,6 +847,13 @@ const Dashboard = () => {
                       border: '2px solid #0077B6',
                       borderRadius: '8px',
                     }}
+                    labelFormatter={(label, payload) => {
+                      if (payload && payload.length > 0) {
+                        const ts = payload[0].payload?.timestamp;
+                        return ts ? formatTimeLabel(ts) : label;
+                      }
+                      return label;
+                    }}
                     formatter={(value, name) => {
                       // Ensure values are displayed with max 2 decimal places
                       const numValue = typeof value === 'number' ? value : parseFloat(value) || 0;
@@ -846,6 +889,15 @@ const Dashboard = () => {
                 </div>
               </div>
             )}
+          </div>
+
+          {/* Last Update Info */}
+          <div className="text-center text-gray-400 text-sm mb-4">
+            <span className="inline-flex items-center">
+              <span className={`inline-block w-2 h-2 rounded-full mr-2 ${autoRefresh ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`}></span>
+              {autoRefresh ? 'Live updating every 2s' : 'Auto-refresh disabled'}
+              {metrics && ` • Last updated: ${new Date(lastUpdateTime).toLocaleTimeString()}`}
+            </span>
           </div>
 
           {/* Optimize Button */}
@@ -1087,23 +1139,18 @@ const Dashboard = () => {
       {selectedView === 'processes' && (
         <div className="bg-[#003566] rounded-lg p-6 border-2 border-[#0077B6] animate-fadeIn">
           <div className="flex justify-between items-center mb-4">
-            <h3 className="text-[#FFC300] text-2xl font-bold">
-              Running Processes {processes.length > 0 && (showAllProcesses ? `(All ${processes.length})` : `(Top 20 of ${processes.length})`)}
-            </h3>
+            <div>
+              <h3 className="text-[#FFC300] text-2xl font-bold">
+                Running Processes {processes.length > 0 && `(${processes.length})`}
+                {displayedProcesses.length < filteredProcesses.length && (
+                  <span className="text-sm text-gray-400 ml-2">
+                    - showing {displayedProcesses.length}
+                  </span>
+                )}
+              </h3>
+            </div>
             <div className="flex space-x-2">
-              {/* Auto-refresh toggle */}
-              <button
-                onClick={() => setAutoRefresh(!autoRefresh)}
-                className={`px-4 py-2 rounded transition-all duration-300 transform hover:scale-105 flex items-center ${
-                  autoRefresh 
-                    ? 'bg-green-600 hover:bg-green-700 text-white' 
-                    : 'bg-gray-600 hover:bg-gray-700 text-white'
-                }`}
-                title={autoRefresh ? 'Auto-refresh ON (2s)' : 'Auto-refresh OFF'}
-              >
-                {autoRefresh ? '🔄 Auto' : '⏸️ Manual'}
-              </button>
-              {processes.length > 20 && (
+              {filteredProcesses.length > 20 && (
                 <button
                   onClick={() => setShowAllProcesses(!showAllProcesses)}
                   className="bg-[#0077B6] hover:bg-[#0096E0] text-white px-4 py-2 rounded transition-all duration-300 transform hover:scale-105"
@@ -1114,18 +1161,27 @@ const Dashboard = () => {
               <button
                 onClick={fetchProcesses}
                 disabled={isRefreshingProcesses}
-                className="bg-[#0077B6] hover:bg-[#0096E0] text-white px-4 py-2 rounded transition-all duration-300 transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+                className={`px-4 py-2 rounded transition-all duration-300 transform flex items-center gap-2 ${
+                  isRefreshingProcesses 
+                    ? 'bg-[#0096E0]/50 text-white/70 cursor-not-allowed' 
+                    : 'bg-[#0077B6] hover:bg-[#0096E0] text-white hover:scale-105'
+                }`}
               >
                 {isRefreshingProcesses ? (
                   <>
-                    <svg className="animate-spin h-4 w-4 mr-2" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle>
+                    <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
                     Refreshing...
                   </>
                 ) : (
-                  '🔄 Refresh'
+                  <>
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    Refresh
+                  </>
                 )}
               </button>
             </div>
@@ -1147,12 +1203,7 @@ const Dashboard = () => {
             )}
           </div>
           
-          {isRefreshingProcesses && processes.length === 0 ? (
-            <div className="text-center py-8">
-              <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#FFD60A]"></div>
-              <div className="text-white mt-2">Loading processes...</div>
-            </div>
-          ) : processes.length > 0 ? (
+          {processes.length > 0 ? (
             <div className="overflow-x-auto">
               <table className="w-full text-white">
                 <thead>
@@ -1186,8 +1237,12 @@ const Dashboard = () => {
                           {proc.cpu !== undefined && proc.cpu !== null ? `${proc.cpu}%` : '0.00%'}
                         </td>
                         <td className="py-2 px-4 text-right">{formatBytes(proc.memory || 0)}</td>
-                        <td className="py-2 px-4 text-right">
-                          {proc.memoryPercent !== undefined && proc.memoryPercent !== null ? `${proc.memoryPercent}%` : '0.00%'}
+                        <td className={`py-2 px-4 text-right font-mono ${
+                          parseFloat(proc.memoryPercent || 0) > 20 ? 'text-red-400' :
+                          parseFloat(proc.memoryPercent || 0) > 10 ? 'text-orange-400' :
+                          parseFloat(proc.memoryPercent || 0) > 5 ? 'text-yellow-400' : 'text-white'
+                        }`}>
+                          {proc.memoryPercent !== undefined && proc.memoryPercent !== null && proc.memoryPercent !== '0.00' ? `${proc.memoryPercent}%` : '< 0.01%'}
                         </td>
                         <td className="py-2 px-4 text-center">
                           <div className="flex gap-1 justify-center">
@@ -1216,7 +1271,8 @@ const Dashboard = () => {
             </div>
           ) : (
             <div className="text-center text-gray-400 py-8">
-              No processes found. Please wait...
+              <div className="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-[#FFD60A] mb-2"></div>
+              <div>Loading processes...</div>
             </div>
           )}
         </div>

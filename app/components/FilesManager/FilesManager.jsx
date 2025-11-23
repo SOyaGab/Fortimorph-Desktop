@@ -19,7 +19,7 @@ const FilesManager = () => {
               : 'bg-transparent text-slate-300 hover:bg-[#001D3D] hover:text-white'
           }`}
         >
-          🗑️ Quarantine
+          Quarantine
         </button>
         <button
           onClick={() => setActiveSubView('backup')}
@@ -29,7 +29,7 @@ const FilesManager = () => {
               : 'bg-transparent text-slate-300 hover:bg-[#001D3D] hover:text-white'
           }`}
         >
-          🛡️ Backup
+          Backup
         </button>
         <button
           onClick={() => setActiveSubView('convert')}
@@ -39,7 +39,7 @@ const FilesManager = () => {
               : 'bg-transparent text-slate-300 hover:bg-[#001D3D] hover:text-white'
           }`}
         >
-          🔄 Convert
+          Convert
         </button>
         <button
           onClick={() => setActiveSubView('verify')}
@@ -49,7 +49,7 @@ const FilesManager = () => {
               : 'bg-transparent text-slate-300 hover:bg-[#001D3D] hover:text-white'
           }`}
         >
-          🔐 Verify
+          Verify
         </button>
       </div>
 

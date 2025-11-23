@@ -41,7 +41,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // System Monitoring
   system: {
     getMetrics: () => ipcRenderer.invoke('system:get-metrics'),
-    getProcesses: () => ipcRenderer.invoke('system:get-processes'),
+    getProcesses: (options) => ipcRenderer.invoke('system:get-processes', options),
     startProcessStream: () => ipcRenderer.invoke('system:start-process-stream'),
     stopProcessStream: () => ipcRenderer.invoke('system:stop-process-stream'),
     onProcessUpdate: (callback) => {
@@ -296,6 +296,7 @@ contextBridge.exposeInMainWorld('electron', {
       'verification:cleanup',
       // Dialog channels
       'dialog:openDirectory',
+      'dialog:openFileOrFolder',
       // Shell channels
       'shell:showItemInFolder',
       // System channels
@@ -318,7 +319,9 @@ contextBridge.exposeInMainWorld('electron', {
       return ipcRenderer.invoke(channel, ...args);
     }
     throw new Error(`Invalid IPC channel: ${channel}`);
-  }
+  },
+  // Helper method for file/folder selection
+  selectFileOrFolder: () => ipcRenderer.invoke('dialog:openFileOrFolder')
 });
 
 // Log that preload has loaded

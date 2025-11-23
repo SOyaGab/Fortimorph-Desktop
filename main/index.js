@@ -179,6 +179,14 @@ app.whenReady().then(async () => {
     await systemHealthService.initialize();
     console.log('System health service initialized');
     
+    // Pre-warm process cache in background for instant access
+    console.log('Pre-warming process cache for instant access...');
+    monitoringService.getProcessList({ fastMode: true }).then(() => {
+      console.log('✅ Process cache pre-warmed and ready');
+    }).catch(err => {
+      console.warn('Process cache pre-warming failed:', err.message);
+    });
+    
     // Initialize quarantine service
     quarantineService = new QuarantineService(db, logsService);
     await quarantineService.initialize();
@@ -548,9 +556,9 @@ ipcMain.handle('system:get-metrics', async () => {
   }
 });
 
-ipcMain.handle('system:get-processes', async () => {
+ipcMain.handle('system:get-processes', async (event, options = {}) => {
   try {
-    const processes = await monitoringService.getProcessList();
+    const processes = await monitoringService.getProcessList(options);
     return { success: true, data: processes };
   } catch (error) {
     console.error('Error getting process list:', error);
@@ -580,9 +588,9 @@ ipcMain.handle('system:start-process-stream', async (event) => {
     
     isStreamActive = true;
     
-    // Send initial data immediately
+    // Send initial data immediately using fast mode
     try {
-      const initialProcesses = await monitoringService.getProcessList();
+      const initialProcesses = await monitoringService.getProcessList({ fastMode: true });
       if (!event.sender.isDestroyed()) {
         event.sender.send('process-update', { success: true, data: initialProcesses });
       }
@@ -590,11 +598,11 @@ ipcMain.handle('system:start-process-stream', async (event) => {
       console.error('[Process Stream] Error fetching initial data:', error);
     }
     
-    // Set up interval to send updates every 3 seconds (reduced from 2s)
+    // Set up interval to send updates every 3 seconds using fast mode for better responsiveness
     processStreamInterval = setInterval(async () => {
       try {
         if (!event.sender.isDestroyed() && isStreamActive) {
-          const processes = await monitoringService.getProcessList();
+          const processes = await monitoringService.getProcessList({ fastMode: true });
           event.sender.send('process-update', { success: true, data: processes });
         } else {
           // Clean up if window is destroyed
@@ -609,9 +617,9 @@ ipcMain.handle('system:start-process-stream', async (event) => {
           event.sender.send('process-update', { success: false, error: error.message });
         }
       }
-    }, 3000); // 3 seconds - fetching ALL processes with pidusage takes time
+    }, 2000);
     
-    console.log('[Process Stream] Stream started successfully (3s interval, ALL processes)');
+    console.log('[Process Stream] Stream started successfully (2s interval, fast mode)');
     return { success: true, message: 'Process stream started' };
   } catch (error) {
     console.error('[Process Stream] Error starting stream:', error);
@@ -2418,6 +2426,19 @@ ipcMain.handle('dialog:openDirectory', async () => {
     return result;
   } catch (error) {
     console.error('Error showing directory dialog:', error);
+    return { canceled: true, error: error.message };
+  }
+});
+
+// Show open file/folder dialog (supports both files and folders)
+ipcMain.handle('dialog:openFileOrFolder', async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile', 'openDirectory', 'multiSelections']
+    });
+    return result;
+  } catch (error) {
+    console.error('Error showing file/folder dialog:', error);
     return { canceled: true, error: error.message };
   }
 });

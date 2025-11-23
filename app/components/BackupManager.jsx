@@ -159,12 +159,15 @@ export default function BackupManager() {
 
   const handleSelectSourcePath = useCallback(async () => {
     try {
-      const result = await window.electron.invoke('dialog:openDirectory');
+      // Use new API that supports both files and folders
+      const result = await window.electron.selectFileOrFolder();
       if (result && !result.canceled && result.filePaths.length > 0) {
-        setSourcePath(result.filePaths[0]);
+        // Support multiple selections: join paths with semicolon
+        const selectedPaths = result.filePaths.join(';');
+        setSourcePath(selectedPaths);
       }
     } catch (error) {
-      console.error('Failed to select directory:', error);
+      console.error('Failed to select files/folders:', error);
     }
   }, []);
 
@@ -556,13 +559,14 @@ export default function BackupManager() {
 
                 {/* Source Path */}
                 <div>
-                  <label className="block text-sm font-medium mb-2 text-white">Source Directory</label>
+                  <label className="block text-sm font-medium mb-2 text-white">Select Files or Folders</label>
+                  <p className="text-xs text-gray-400 mb-2">You can select folders, individual files, or multiple items</p>
                   <div className="flex gap-2">
                     <input
                       type="text"
                       value={sourcePath}
                       readOnly
-                      placeholder="Select directory to backup"
+                      placeholder="Select files or folders to backup"
                       className="flex-1 px-4 py-2 bg-[#001D3D] border-2 border-[#0077B6] text-white rounded-lg cursor-not-allowed"
                     />
                     <button
@@ -579,37 +583,52 @@ export default function BackupManager() {
                 <div className="space-y-3 p-4 bg-gray-700 rounded-lg">
                   <h3 className="font-medium mb-2">Backup Options</h3>
                   
-                  <label className="flex items-center gap-3 cursor-pointer">
+                  <label className="flex items-start gap-3 cursor-pointer group">
                     <input
                       type="checkbox"
                       checked={encryptBackup}
                       onChange={(e) => setEncryptBackup(e.target.checked)}
-                      className="w-5 h-5"
+                      className="w-5 h-5 mt-0.5"
                     />
-                    <Lock className="w-4 h-4" />
-                    <span>Encrypt backup (AES-256)</span>
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <Lock className="w-4 h-4" />
+                        <span>Encrypt backup (AES-256)</span>
+                      </div>
+                      <p className="text-xs text-gray-400 mt-1">Protects your backup with military-grade encryption. Recommended for sensitive data.</p>
+                    </div>
                   </label>
 
-                  <label className="flex items-center gap-3 cursor-pointer">
+                  <label className="flex items-start gap-3 cursor-pointer group">
                     <input
                       type="checkbox"
                       checked={compressBackup}
                       onChange={(e) => setCompressBackup(e.target.checked)}
-                      className="w-5 h-5"
+                      className="w-5 h-5 mt-0.5"
                     />
-                    <Download className="w-4 h-4" />
-                    <span>Compress files (GZIP)</span>
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <Download className="w-4 h-4" />
+                        <span>Compress files (GZIP)</span>
+                      </div>
+                      <p className="text-xs text-gray-400 mt-1">Reduces backup size by 20-80%. Saves storage space with minimal performance impact.</p>
+                    </div>
                   </label>
 
-                  <label className="flex items-center gap-3 cursor-pointer">
+                  <label className="flex items-start gap-3 cursor-pointer group">
                     <input
                       type="checkbox"
                       checked={incrementalBackup}
                       onChange={(e) => setIncrementalBackup(e.target.checked)}
-                      className="w-5 h-5"
+                      className="w-5 h-5 mt-0.5"
                     />
-                    <RefreshCw className="w-4 h-4" />
-                    <span>Incremental (only backup changed files)</span>
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <RefreshCw className="w-4 h-4" />
+                        <span>Incremental (only backup changed files)</span>
+                      </div>
+                      <p className="text-xs text-gray-400 mt-1">Much faster backups after the first one. Only backs up new or modified files.</p>
+                    </div>
                   </label>
                 </div>
               </div>

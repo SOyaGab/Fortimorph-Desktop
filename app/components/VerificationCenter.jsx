@@ -528,14 +528,17 @@ const VerificationCenter = () => {
                       value={verificationInput}
                       onChange={(e) => setVerificationInput(e.target.value)}
                       onFocus={(e) => {
-                        // Ensure input is responsive on focus
-                        e.target.disabled = false;
+                        // Ensure input is always responsive
+                        console.log('Input focused, value length:', e.target.value.length);
+                      }}
+                      onBlur={(e) => {
+                        console.log('Input blurred, value length:', e.target.value.length);
                       }}
                       placeholder="Paste recovery key here or scan QR code below..."
                       rows={4}
                       className="w-full bg-gray-700/50 border border-gray-600 rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500 font-mono text-sm transition-all"
-                      disabled={verifying}
                       autoComplete="off"
+                      readOnly={false}
                     />
                     <p className="text-xs text-gray-500 mt-1">
                       {verificationInput.length} characters {verificationInput.length > 0 && '✓'}
