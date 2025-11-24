@@ -338,38 +338,47 @@ class MonitoringService {
     const now = Date.now();
     const timeSinceLastFetch = now - this.lastProcessFetch;
     
-    // If force flag is set, skip cache and fetch fresh data
+    // If force flag is set, trigger background refresh but return cache immediately
     if (force) {
-      console.log('[Process List] 🔄 FORCE REFRESH - bypassing cache');
+      console.log('[Process List] 🔄 FORCE REFRESH - returning cache + triggering background update');
+      
+      // Trigger background refresh (don't wait for it)
+      if (!this.isProcessFetching) {
+        this.refreshProcessesInBackground();
+      }
+      
+      // Return cache immediately (if available) for instant response
+      if (this.cachedProcessList.length > 0) {
+        return this.cachedProcessList;
+      }
+      
+      // If no cache, do quick fetch
       return await this.fetchProcessesFast();
     }
     
-    // ALWAYS return cached data immediately if available (instant UI update)
-    if (this.cachedProcessList.length > 0 && timeSinceLastFetch < 3000) {
-      console.log(`[Process List] ⚡ Instant return from cache (${this.cachedProcessList.length} processes)`);
+    // Always return cached data immediately if available (even if stale)
+    // Then trigger background refresh if needed
+    if (this.cachedProcessList.length > 0) {
+      console.log(`[Process List] ⚡ Cache hit (${this.cachedProcessList.length} processes, age: ${timeSinceLastFetch}ms)`);
       
-      // Refresh in background if cache is getting old (> 800ms for faster updates)
-      if (timeSinceLastFetch > 800 && !this.isProcessFetching) {
-        console.log('[Process List] 🔄 Triggering background refresh...');
+      // Trigger background refresh if cache is stale (> 2 seconds)
+      if (timeSinceLastFetch > 2000 && !this.isProcessFetching) {
+        console.log('[Process List] 🔄 Triggering background refresh');
         this.refreshProcessesInBackground();
       }
       
       return this.cachedProcessList;
     }
     
-    // If already fetching, wait for it or return cached
+    // If already fetching, wait briefly or return empty
     if (this.isProcessFetching) {
-      console.log('[Process List] Already fetching...');
-      // If we have cache, return it immediately
-      if (this.cachedProcessList.length > 0) {
-        return this.cachedProcessList;
-      }
-      // Otherwise wait a bit for the fetch to complete
+      console.log('[Process List] ⏳ Fetch in progress, waiting briefly...');
+      // Wait max 100ms for initial fetch
       await new Promise(resolve => setTimeout(resolve, 100));
       return this.cachedProcessList.length > 0 ? this.cachedProcessList : [];
     }
     
-    // Perform fast fetch
+    // Perform fresh fetch (only if no cache and not already fetching)
     console.log('[Process List] 🚀 Starting fresh fetch (no cache available)');
     return await this.fetchProcessesFast();
   }
@@ -402,25 +411,42 @@ class MonitoringService {
         }));
       }
       
-      // Get ALL process PIDs for complete CPU sampling
-      const allPids = processList
+      // Sort by memory first for instant display
+      processList.sort((a, b) => b.memory - a.memory);
+      
+      // Get top 50 PIDs by memory for CPU sampling
+      const topPids = processList
+        .slice(0, 50)
         .map(p => p.pid)
         .filter(pid => pid > 0);
       
-      console.log(`[Process List] Sampling CPU for top ${Math.min(allPids.length, 100)} processes...`);
+      console.log(`[Process List] Sampling CPU for top ${topPids.length} processes...`);
       
-      // Get CPU stats for top processes only (optimized for speed)
-      // Limit to top 100 PIDs to avoid slow sampling
-      const topPids = allPids.slice(0, 100);
+      // Get CPU stats with short timeout for fast response
       let cpuStats = {};
-      try {
-        const cpuPromise = pidusage(topPids);
-        // Reduced timeout from 2000ms to 600ms for faster refresh
-        const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve({}), 600));
-        cpuStats = await Promise.race([cpuPromise, timeoutPromise]);
-        console.log(`[Process List] Got CPU stats for ${Object.keys(cpuStats).length} processes in ${Date.now() - startTime}ms`);
-      } catch (err) {
-        console.warn('[Process List] pidusage sampling failed:', err.message);
+      
+      if (topPids.length > 0) {
+        try {
+          // Use shorter timeout (400ms) for instant display
+          const cpuPromise = pidusage(topPids);
+          const timeoutPromise = new Promise((resolve) => setTimeout(() => {
+            console.warn('[Process List] CPU sampling timeout after 400ms');
+            resolve({});
+          }, 400));
+          
+          cpuStats = await Promise.race([cpuPromise, timeoutPromise]);
+          
+          // Check if we got valid data
+          const validStats = Object.keys(cpuStats).length;
+          if (validStats > 0) {
+            console.log(`[Process List] ✅ Got CPU stats for ${validStats} processes in ${Date.now() - startTime}ms`);
+          } else {
+            console.warn('[Process List] ⚠️ No CPU data returned, processes will show 0.00%');
+          }
+        } catch (err) {
+          console.error('[Process List] pidusage error:', err.message);
+          // Continue without CPU data rather than failing completely
+        }
       }
       
       // Merge CPU data and format

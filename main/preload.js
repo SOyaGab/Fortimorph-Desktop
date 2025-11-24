@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getProcesses: (options) => ipcRenderer.invoke('system:get-processes', options),
     startProcessStream: () => ipcRenderer.invoke('system:start-process-stream'),
     stopProcessStream: () => ipcRenderer.invoke('system:stop-process-stream'),
+    setTabVisibility: (isVisible) => ipcRenderer.send('system:tab-visibility-changed', isVisible),
     onProcessUpdate: (callback) => {
       ipcRenderer.on('process-update', (_event, data) => callback(data));
     },

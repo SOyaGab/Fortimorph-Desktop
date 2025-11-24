@@ -6,6 +6,7 @@ const db = require('./services/database');
 const firebase = require('./services/firebase');
 const emailService = require('./services/emailService');
 const monitoringService = require('./services/monitoring');
+// const processMonitorService = require('./services/processMonitorService'); // DISABLED - causing performance issues
 const optimizerService = require('./services/optimizer');
 const LogsService = require('./services/logsService');
 const BatteryService = require('./services/batteryService');
@@ -566,13 +567,16 @@ ipcMain.handle('system:get-processes', async (event, options = {}) => {
   }
 });
 
-// Real-time process streaming for Processes tab
+// Real-time process streaming for Processes tab with adaptive polling
 let processStreamInterval = null;
 let isStreamActive = false;
+let currentPollInterval = 3000; // Start with 3 seconds
+let consecutiveNoChangeCount = 0;
+let isTabVisible = true;
 
 ipcMain.handle('system:start-process-stream', async (event) => {
   try {
-    console.log('[Process Stream] Starting real-time process updates...');
+    console.log('[Process Stream] Starting real-time process updates with adaptive polling...');
     
     // Prevent multiple streams
     if (isStreamActive) {
@@ -587,26 +591,36 @@ ipcMain.handle('system:start-process-stream', async (event) => {
     }
     
     isStreamActive = true;
+    currentPollInterval = 2000; // 2 seconds - stable interval
+    consecutiveNoChangeCount = 0;
     
-    // Send initial data immediately using fast mode
-    try {
-      const initialProcesses = await monitoringService.getProcessList({ fastMode: true });
-      if (!event.sender.isDestroyed()) {
+    // Send initial data immediately using cached data (no await for instant response)
+    monitoringService.getProcessList({ fastMode: true }).then(initialProcesses => {
+      if (!event.sender.isDestroyed() && initialProcesses && initialProcesses.length > 0) {
+        console.log(`[Process Stream] Sending initial ${initialProcesses.length} processes to UI`);
         event.sender.send('process-update', { success: true, data: initialProcesses });
       }
-    } catch (error) {
+    }).catch(error => {
       console.error('[Process Stream] Error fetching initial data:', error);
-    }
+    });
     
-    // Set up interval to send updates every 3 seconds using fast mode for better responsiveness
-    processStreamInterval = setInterval(async () => {
+    // Simple polling function - stable 2s interval
+    const streamUpdate = async () => {
       try {
         if (!event.sender.isDestroyed() && isStreamActive) {
+          // Skip updates if tab is not visible
+          if (!isTabVisible) {
+            return;
+          }
+          
+          // Get fresh process data
           const processes = await monitoringService.getProcessList({ fastMode: true });
-          event.sender.send('process-update', { success: true, data: processes });
+          event.sender.send('process-update', { 
+            success: true, 
+            data: processes
+          });
         } else {
           // Clean up if window is destroyed
-          console.log('[Process Stream] Window destroyed, cleaning up...');
           clearInterval(processStreamInterval);
           processStreamInterval = null;
           isStreamActive = false;
@@ -617,9 +631,12 @@ ipcMain.handle('system:start-process-stream', async (event) => {
           event.sender.send('process-update', { success: false, error: error.message });
         }
       }
-    }, 2000);
+    };
     
-    console.log('[Process Stream] Stream started successfully (2s interval, fast mode)');
+    // Start polling with stable 2s interval
+    processStreamInterval = setInterval(streamUpdate, currentPollInterval);
+    
+    console.log(`[Process Stream] Stream started successfully (${currentPollInterval}ms interval)`);
     return { success: true, message: 'Process stream started' };
   } catch (error) {
     console.error('[Process Stream] Error starting stream:', error);
@@ -645,6 +662,12 @@ ipcMain.handle('system:stop-process-stream', async () => {
     console.error('[Process Stream] Error stopping stream:', error);
     return { success: false, error: error.message };
   }
+});
+
+// Handle tab visibility changes
+ipcMain.on('system:tab-visibility-changed', (event, isVisible) => {
+  isTabVisible = isVisible;
+  console.log(`[Process Stream] Tab visibility changed: ${isVisible ? 'visible' : 'hidden'}`);
 });
 
 ipcMain.handle('system:get-cpu', async () => {

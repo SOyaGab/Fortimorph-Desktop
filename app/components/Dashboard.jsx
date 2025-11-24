@@ -117,56 +117,56 @@ const Dashboard = () => {
     }
   };
 
-  // Fetch process list (manual refresh) - SIMPLE AND FAST
+  // Fetch process list (manual refresh) - Smart refresh without blocking
   const fetchProcesses = async () => {
     if (isRefreshingProcesses) return; // Prevent double-click
     
     setIsRefreshingProcesses(true);
-    console.log('🔄 Manual refresh clicked');
+    console.log('[Dashboard] 🔄 Manual refresh - triggering background update');
     
     try {
-      // Add timeout to prevent hanging
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Timeout')), 5000)
-      );
+      // Don't use force flag - just get fresh data with normal flow
+      const result = await window.electronAPI.system.getProcesses({ force: true });
       
-      const resultPromise = window.electronAPI.system.getProcesses({ force: true });
-      const result = await Promise.race([resultPromise, timeoutPromise]);
+      console.log('[Dashboard] ✅ Refresh completed:', {
+        success: result.success,
+        processCount: result.data?.length
+      });
       
-      console.log('✅ Refresh result:', result.success, result.data?.length);
-      
-      if (result.success && result.data) {
+      if (result.success && result.data && result.data.length > 0) {
         setProcesses(result.data);
+        console.log('[Dashboard] ✅ Updated UI with', result.data.length, 'processes');
+      } else {
+        console.error('[Dashboard] ❌ Invalid data received:', result);
       }
     } catch (error) {
-      console.error('❌ Error fetching processes:', error);
+      console.error('[Dashboard] ❌ Refresh error:', error);
+      // Don't show alert for refresh failures - just log it
+      console.warn('Refresh failed, keeping current data');
     } finally {
       setIsRefreshingProcesses(false);
-      console.log('✅ Refresh complete');
     }
   };
 
-  // Load processes when Processes tab is selected - INSTANT with cache, then stream updates
+  // Load processes when Processes tab is selected - INSTANT with cache
   useEffect(() => {
     if (selectedView !== 'processes') {
       return;
     }
     
-    console.log('📋 Processes view selected');
+    console.log('📋 Processes view selected - loading from cache');
     
     // Load cached data immediately for instant display
     const loadInitialProcesses = async () => {
       try {
-        // Always fetch fresh data when entering processes view for accurate display
-        const result = await window.electronAPI.system.getProcesses({ force: true });
+        // Use cached data for instant display (no force flag)
+        const result = await window.electronAPI.system.getProcesses();
         if (result.success && result.data && result.data.length > 0) {
-          console.log('⚡ Got initial processes:', result.data.length);
+          console.log('⚡ Got processes from cache:', result.data.length);
           setProcesses(result.data);
-        } else {
-          console.log('⚠️ No processes returned, will try stream');
         }
       } catch (error) {
-        console.error('Error loading initial processes:', error);
+        console.error('Error loading processes:', error);
       }
     };
     
@@ -309,19 +309,31 @@ const Dashboard = () => {
       window.electronAPI.system.stopProcessStream().catch(err => 
         console.error('Error stopping stream:', err)
       );
+      window.electronAPI.system.setTabVisibility(false);
       return;
     }
     
-    console.log('📋 Processes view selected - starting real-time stream');
+    console.log('Processes view selected - starting stream');
+    window.electronAPI.system.setTabVisibility(true);
     
     // Set up listener for process updates
     const handleProcessUpdate = (result) => {
       if (result.success && result.data && Array.isArray(result.data) && result.data.length > 0) {
-        // Only update if we have valid process data
+        // Log first update to verify data quality
+        if (processes.length === 0) {
+          console.log('[Dashboard] First process data received:', {
+            count: result.data.length,
+            samples: result.data.slice(0, 3).map(p => ({ 
+              name: p.name, 
+              cpu: p.cpu, 
+              cpuPercent: p.cpuPercent,
+              memory: p.memoryPercent 
+            }))
+          });
+        }
         setProcesses(result.data);
-        // Don't set isRefreshingProcesses here - only for manual refresh
       } else {
-        console.error('Process update error:', result.error || 'Invalid or empty data');
+        console.warn('[Dashboard] Invalid process update:', result);
       }
     };
     
@@ -331,20 +343,18 @@ const Dashboard = () => {
     window.electronAPI.system.startProcessStream()
       .then(result => {
         if (result.success) {
-          console.log('✅ Process stream started');
+          console.log('Process stream started');
         }
       })
       .catch(error => {
-        console.error('❌ Failed to start process stream:', error);
+        console.error('Failed to start process stream:', error);
       });
     
     // Cleanup function
     return () => {
-      console.log('🛑 Stopping process stream');
-      window.electronAPI.system.stopProcessStream().catch(err => 
-        console.error('Error in cleanup:', err)
-      );
+      window.electronAPI.system.stopProcessStream().catch(() => {});
       window.electronAPI.system.removeProcessUpdateListener();
+      window.electronAPI.system.setTabVisibility(false);
     };
   }, [selectedView]);
 
@@ -1270,9 +1280,32 @@ const Dashboard = () => {
               </table>
             </div>
           ) : (
-            <div className="text-center text-gray-400 py-8">
-              <div className="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-[#FFD60A] mb-2"></div>
-              <div>Loading processes...</div>
+            <div className="animate-pulse">
+              <table className="w-full text-white">
+                <thead>
+                  <tr className="border-b-2 border-[#0077B6]">
+                    <th className="text-left py-2 px-4">PID</th>
+                    <th className="text-left py-2 px-4">Name</th>
+                    <th className="text-right py-2 px-4">CPU %</th>
+                    <th className="text-right py-2 px-4">Memory</th>
+                    <th className="text-right py-2 px-4">Memory %</th>
+                    <th className="text-center py-2 px-4">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...Array(10)].map((_, i) => (
+                    <tr key={i} className="border-b border-[#0077B6]">
+                      <td className="py-2 px-4"><div className="h-4 bg-[#0077B6] rounded w-12"></div></td>
+                      <td className="py-2 px-4"><div className="h-4 bg-[#0077B6] rounded w-32"></div></td>
+                      <td className="py-2 px-4"><div className="h-4 bg-[#0077B6] rounded w-12 ml-auto"></div></td>
+                      <td className="py-2 px-4"><div className="h-4 bg-[#0077B6] rounded w-20 ml-auto"></div></td>
+                      <td className="py-2 px-4"><div className="h-4 bg-[#0077B6] rounded w-12 ml-auto"></div></td>
+                      <td className="py-2 px-4"><div className="h-8 bg-[#0077B6] rounded w-20 mx-auto"></div></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="text-center text-gray-400 py-4 text-sm">Loading processes...</div>
             </div>
           )}
         </div>
