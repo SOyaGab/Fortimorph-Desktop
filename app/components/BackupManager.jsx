@@ -132,6 +132,8 @@ export default function BackupManager() {
   // Form states
   const [backupName, setBackupName] = useState('');
   const [sourcePath, setSourcePath] = useState('');
+  const [sourceMode, setSourceMode] = useState('directory'); // 'directory' | 'files'
+  const [selectedFiles, setSelectedFiles] = useState([]);
   const [restorePath, setRestorePath] = useState('');
   const [encryptBackup, setEncryptBackup] = useState(true);
   const [compressBackup, setCompressBackup] = useState(true);
@@ -171,6 +173,23 @@ export default function BackupManager() {
     }
   }, []);
 
+  const handleSelectFiles = useCallback(async () => {
+    try {
+      const result = await window.electron.invoke('show-open-dialog', {
+        properties: ['openFile', 'multiSelections'],
+        title: 'Select files to include in backup'
+      });
+
+      if (result && !result.canceled && result.filePaths.length > 0) {
+        setSelectedFiles(result.filePaths);
+        // show a friendly summary in the sourcePath input
+        setSourcePath(`${result.filePaths.length} file(s) selected`);
+      }
+    } catch (error) {
+      console.error('Failed to select files:', error);
+    }
+  }, []);
+
   const handleSelectRestorePath = useCallback(async () => {
     try {
       const result = await window.electron.invoke('dialog:openDirectory');
@@ -183,8 +202,8 @@ export default function BackupManager() {
   }, []);
 
   const handleCreateBackup = useCallback(async () => {
-    if (!backupName || !sourcePath) {
-      alert('Please provide a backup name and select a source directory');
+    if (!backupName || (!sourcePath && selectedFiles.length === 0)) {
+      alert('Please provide a backup name and select a source (directory or files)');
       return;
     }
 
@@ -192,21 +211,30 @@ export default function BackupManager() {
     setProgress({ phase: 'init', message: 'Initializing backup...' });
 
     try {
-      const result = await window.backupAPI.create({
+      // If user selected individual files, send them as `sourceFiles` array
+      const payload = {
         name: backupName,
-        sourcePath,
         options: {
           encrypt: encryptBackup,
           compress: compressBackup,
           incremental: incrementalBackup
         }
-      });
+      };
+
+      if (sourceMode === 'files' && selectedFiles.length > 0) {
+        payload.sourceFiles = selectedFiles;
+      } else {
+        payload.sourcePath = sourcePath;
+      }
+
+      const result = await window.backupAPI.create(payload);
 
       if (result.success) {
         alert(`Backup created successfully!\nFiles backed up: ${result.filesBackedUp}\nTotal size: ${formatBytes(result.totalSize)}`);
         setShowCreateDialog(false);
         setBackupName('');
         setSourcePath('');
+        setSelectedFiles([]);
         loadBackups();
       }
     } catch (error) {
@@ -216,7 +244,7 @@ export default function BackupManager() {
       setBackupInProgress(false);
       setProgress(null);
     }
-  }, [backupName, sourcePath, encryptBackup, compressBackup, incrementalBackup, loadBackups]);
+  }, [backupName, sourcePath, sourceMode, selectedFiles, encryptBackup, compressBackup, incrementalBackup, loadBackups]);
 
   const handleRestoreBackup = useCallback(async () => {
     if (!selectedBackup || !restorePath) {
@@ -505,7 +533,12 @@ export default function BackupManager() {
                   Refresh
                 </button>
                 <button
-                  onClick={() => setShowCreateDialog(true)}
+                  onClick={() => {
+                    setSourceMode('directory');
+                    setSelectedFiles([]);
+                    setSourcePath('');
+                    setShowCreateDialog(true);
+                  }}
                   disabled={backupInProgress}
                   className="px-6 py-2 bg-[#FFC300] hover:bg-[#FFD60A] text-[#001D3D] font-semibold rounded-lg transition flex items-center gap-2 disabled:opacity-50"
                 >
@@ -557,26 +590,61 @@ export default function BackupManager() {
                   />
                 </div>
 
-                {/* Source Path */}
+                {/* Source Path / Files */}
                 <div>
-                  <label className="block text-sm font-medium mb-2 text-white">Select Files or Folders</label>
-                  <p className="text-xs text-gray-400 mb-2">You can select folders, individual files, or multiple items</p>
+                  <label className="block text-sm font-medium mb-2 text-white">Source</label>
+                  <div className="flex items-center gap-4 mb-3">
+                    <label className="flex items-center gap-2 text-sm">
+                      <input
+                        type="radio"
+                        name="sourceMode"
+                        value="directory"
+                        checked={sourceMode === 'directory'}
+                        onChange={() => {
+                          setSourceMode('directory');
+                          setSourcePath('');
+                          setSelectedFiles([]);
+                        }}
+                        className="w-4 h-4"
+                      />
+                      <span>Directory</span>
+                    </label>
+                    <label className="flex items-center gap-2 text-sm">
+                      <input
+                        type="radio"
+                        name="sourceMode"
+                        value="files"
+                        checked={sourceMode === 'files'}
+                        onChange={() => {
+                          setSourceMode('files');
+                          setSourcePath('');
+                          setSelectedFiles([]);
+                        }}
+                        className="w-4 h-4"
+                      />
+                      <span>Files</span>
+                    </label>
+                  </div>
+
                   <div className="flex gap-2">
                     <input
                       type="text"
                       value={sourcePath}
                       readOnly
-                      placeholder="Select files or folders to backup"
+                      placeholder={sourceMode === 'files' ? 'Select files to backup' : 'Select directory to backup'}
                       className="flex-1 px-4 py-2 bg-[#001D3D] border-2 border-[#0077B6] text-white rounded-lg cursor-not-allowed"
                     />
                     <button
-                      onClick={handleSelectSourcePath}
+                      onClick={sourceMode === 'files' ? handleSelectFiles : handleSelectSourcePath}
                       className="px-4 py-2 bg-[#003566] hover:bg-[#0077B6] text-white rounded-lg transition flex items-center gap-2"
                     >
                       <FolderOpen className="w-4 h-4" />
                       Browse
                     </button>
                   </div>
+                  {sourceMode === 'files' && selectedFiles && selectedFiles.length > 0 && (
+                    <div className="text-sm text-gray-400 mt-2">{selectedFiles.length} file(s) selected</div>
+                  )}
                 </div>
 
                 {/* Options */}

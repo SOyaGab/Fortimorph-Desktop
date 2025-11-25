@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Trash2, FolderOpen, RotateCcw, Trash, Clock, XCircle } from 'lucide-react';
 
 const QuarantinePanel = () => {
   const [quarantinedFiles, setQuarantinedFiles] = useState([]);
@@ -365,7 +366,10 @@ const QuarantinePanel = () => {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-white">🗑️ Quarantine Manager</h2>
+          <h2 className="text-2xl font-bold text-white flex items-center gap-3">
+            <Trash2 className="w-7 h-7 text-red-400" />
+            Quarantine Manager
+          </h2>
           <p className="text-slate-400 text-sm mt-1">
             Securely isolate and manage suspicious or unwanted files
           </p>
@@ -510,7 +514,7 @@ const QuarantinePanel = () => {
               className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors flex items-center gap-2"
               title="Open Quarantine Folder"
             >
-              <span>📂</span>
+              <FolderOpen className="w-4 h-4" />
               <span>Open Folder</span>
             </button>
             <button
@@ -518,7 +522,7 @@ const QuarantinePanel = () => {
               disabled={selectedFiles.size === 0 || loading}
               className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-slate-600 disabled:cursor-not-allowed text-white rounded-lg transition-colors flex items-center gap-2"
             >
-              <span>↺</span>
+              <RotateCcw className="w-4 h-4" />
               <span>Restore ({selectedFiles.size})</span>
             </button>
             <button
@@ -526,7 +530,7 @@ const QuarantinePanel = () => {
               disabled={selectedFiles.size === 0 || loading}
               className="px-4 py-2 bg-red-600 hover:bg-red-700 disabled:bg-slate-600 disabled:cursor-not-allowed text-white rounded-lg transition-colors flex items-center gap-2"
             >
-              <span>🗑</span>
+              <Trash2 className="w-4 h-4" />
               <span>Purge ({selectedFiles.size})</span>
             </button>
           </div>
@@ -537,7 +541,7 @@ const QuarantinePanel = () => {
       {retryQueue.length > 0 && (
         <div className="bg-yellow-500/10 border border-yellow-500 rounded-lg p-4">
           <div className="flex items-center gap-3">
-            <span className="text-2xl">⏱</span>
+            <Clock className="w-7 h-7 text-yellow-400" />
             <div>
               <div className="text-yellow-300 font-semibold">Retry Queue Active</div>
               <div className="text-yellow-400 text-sm">
@@ -565,7 +569,9 @@ const QuarantinePanel = () => {
 
         {quarantinedFiles.length === 0 ? (
           <div className="p-12 text-center">
-            <div className="text-6xl mb-4">📁</div>
+            <div className="mb-4">
+              <FolderOpen className="w-16 h-16 mx-auto text-slate-400" />
+            </div>
             <div className="text-slate-400 text-lg">No quarantined files</div>
             <div className="text-slate-500 text-sm mt-2">
               Files moved to quarantine will appear here

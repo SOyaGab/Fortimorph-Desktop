@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const Store = require('electron-store');
 const db = require('./services/database');
 const firebase = require('./services/firebase');
@@ -1599,15 +1600,61 @@ ipcMain.handle('quarantine:openFolder', async () => {
 // ========================================
 
 // Create backup
-ipcMain.handle('backup:create', async (_event, { name, sourcePath, options }) => {
+ipcMain.handle('backup:create', async (_event, payload) => {
   try {
     if (!backupService) {
       return { success: false, error: 'Backup service not initialized' };
     }
     
+    const { name, sourcePath, sourceFiles, options } = payload || {};
     const userId = getCurrentUserId();
-    const result = await backupService.createBackup(sourcePath, { name, ...options, userId });
-    return result;
+    const params = { name, ...options, userId };
+
+    // If renderer passed `sourceFiles`, create a temp directory and copy selected files into it
+    let tempDir = null;
+    try {
+      if (sourceFiles && Array.isArray(sourceFiles) && sourceFiles.length > 0) {
+        tempDir = path.join(os.tmpdir(), `fortimorph_temp_backup_${Date.now()}`);
+        fs.mkdirSync(tempDir, { recursive: true });
+
+        for (const filePath of sourceFiles) {
+          try {
+            const base = path.basename(filePath);
+            let targetPath = path.join(tempDir, base);
+            // Avoid collisions by appending a suffix when needed
+            let counter = 1;
+            while (fs.existsSync(targetPath)) {
+              const parsed = path.parse(base);
+              targetPath = path.join(tempDir, `${parsed.name}_${counter}${parsed.ext}`);
+              counter++;
+            }
+            fs.copyFileSync(filePath, targetPath);
+          } catch (copyErr) {
+            console.warn('Failed to copy selected file to temp dir:', copyErr.message);
+          }
+        }
+
+        // Call createBackup on the temp directory
+        const result = await backupService.createBackup(tempDir, params);
+        return result;
+      }
+
+      // Default: treat sourcePath as directory
+      if (!sourcePath) {
+        throw new Error('sourcePath or sourceFiles is required');
+      }
+      const result = await backupService.createBackup(sourcePath, params);
+      return result;
+    } finally {
+      // Cleanup temp dir if we created one
+      try {
+        if (tempDir && fs.existsSync(tempDir)) {
+          fs.rmSync(tempDir, { recursive: true, force: true });
+        }
+      } catch (cleanupErr) {
+        console.warn('Failed to cleanup temp backup dir:', cleanupErr.message);
+      }
+    }
   } catch (error) {
     console.error('Error creating backup:', error);
     return { success: false, error: error.message };
