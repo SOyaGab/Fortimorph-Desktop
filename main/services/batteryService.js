@@ -2185,6 +2185,44 @@ class BatteryService {
     const userId = this.getUserId ? this.getUserId() : null;
     this.db.addLog('battery', 'Battery service shut down', null, 'info', userId);
   }
+
+  /**
+   * Get current process list for instant display in Processes tab
+   * Uses the already-tracked process data (no additional system calls needed)
+   * @returns {Array} List of processes with PID, name, CPU, memory info
+   */
+  getTrackedProcessList() {
+    const processes = [];
+    const totalMem = require('os').totalmem();
+    
+    for (const [pid, data] of this.processTracking.entries()) {
+      // Calculate current-ish values from tracking data
+      const avgCpu = data.samples > 0 ? data.totalCpu / data.samples : 0;
+      const avgMem = data.samples > 0 ? data.totalMem / data.samples : 0;
+      const memBytes = (avgMem / 100) * totalMem;
+      
+      processes.push({
+        pid: pid,
+        name: data.name,
+        cpu: avgCpu.toFixed(2),
+        cpuPercent: avgCpu,
+        memory: memBytes,
+        memoryFormatted: (memBytes / 1024 / 1024).toFixed(1) + ' MB',
+        memoryPercent: avgMem.toFixed(2),
+        memoryPercentNum: avgMem,
+        priority: 'Normal',
+        state: 'running',
+        command: data.command || data.name,
+        timestamp: Date.now()
+      });
+    }
+    
+    // Sort by memory (most common initial sort)
+    processes.sort((a, b) => b.memoryPercentNum - a.memoryPercentNum);
+    
+    console.log(`[BatteryService] getTrackedProcessList: ${processes.length} processes`);
+    return processes;
+  }
 }
 
 module.exports = BatteryService;

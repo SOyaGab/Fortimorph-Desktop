@@ -559,10 +559,28 @@ ipcMain.handle('system:get-metrics', async () => {
 
 ipcMain.handle('system:get-processes', async (event, options = {}) => {
   try {
-    const processes = await monitoringService.getProcessList(options);
-    return { success: true, data: processes };
+    // Try primary method first
+    let processes = await monitoringService.getProcessList(options);
+    
+    // Fallback to battery service tracked processes if primary returns empty
+    if ((!processes || processes.length === 0) && batteryService) {
+      console.log('[system:get-processes] Primary method returned empty, using battery service fallback');
+      processes = batteryService.getTrackedProcessList();
+    }
+    
+    return { success: true, data: processes || [] };
   } catch (error) {
     console.error('Error getting process list:', error);
+    
+    // Even on error, try to return battery service data as fallback
+    if (batteryService) {
+      const fallbackData = batteryService.getTrackedProcessList();
+      if (fallbackData && fallbackData.length > 0) {
+        console.log('[system:get-processes] Using battery service fallback after error');
+        return { success: true, data: fallbackData };
+      }
+    }
+    
     return { success: false, error: error.message };
   }
 });
@@ -576,68 +594,86 @@ let isTabVisible = true;
 
 ipcMain.handle('system:start-process-stream', async (event) => {
   try {
-    console.log('[Process Stream] Starting real-time process updates with adaptive polling...');
+    // Helper function to get best available process data
+    const getBestProcessData = async () => {
+      // Try monitoring service first
+      let data = await monitoringService.getProcessList({ instant: true }).catch(() => []);
+      
+      // Fallback to battery service if empty
+      if ((!data || data.length === 0) && batteryService) {
+        data = batteryService.getTrackedProcessList();
+      }
+      
+      return data || [];
+    };
     
-    // Prevent multiple streams
     if (isStreamActive) {
-      console.log('[Process Stream] Stream already active, skipping...');
+      // Even if stream is already running, send current data immediately
+      getBestProcessData().then(data => {
+        if (!event.sender.isDestroyed() && data?.length > 0) {
+          event.sender.send('process-update', { success: true, data });
+        }
+      });
       return { success: true, message: 'Stream already running' };
     }
     
-    // Clear any existing interval
     if (processStreamInterval) {
       clearInterval(processStreamInterval);
       processStreamInterval = null;
     }
     
     isStreamActive = true;
-    currentPollInterval = 2000; // 2 seconds - stable interval
-    consecutiveNoChangeCount = 0;
+    currentPollInterval = 2000;
     
-    // Send initial data immediately using cached data (no await for instant response)
-    monitoringService.getProcessList({ fastMode: true }).then(initialProcesses => {
-      if (!event.sender.isDestroyed() && initialProcesses && initialProcesses.length > 0) {
-        console.log(`[Process Stream] Sending initial ${initialProcesses.length} processes to UI`);
-        event.sender.send('process-update', { success: true, data: initialProcesses });
+    console.log('[Stream] Starting process stream...');
+    
+    // STEP 1: Send battery service data IMMEDIATELY (already collected, instant!)
+    if (batteryService) {
+      const instantData = batteryService.getTrackedProcessList();
+      if (!event.sender.isDestroyed() && instantData?.length > 0) {
+        console.log(`[Stream] ⚡ Battery service instant: ${instantData.length} processes`);
+        event.sender.send('process-update', { success: true, data: instantData });
       }
-    }).catch(error => {
-      console.error('[Process Stream] Error fetching initial data:', error);
-    });
+    }
     
-    // Simple polling function - stable 2s interval
-    const streamUpdate = async () => {
-      try {
-        if (!event.sender.isDestroyed() && isStreamActive) {
-          // Skip updates if tab is not visible
-          if (!isTabVisible) {
-            return;
+    // STEP 2: Also try monitoring service instant (runs in parallel)
+    monitoringService.getProcessList({ instant: true }).then(data => {
+      if (!event.sender.isDestroyed() && data?.length > 0) {
+        console.log(`[Stream] ⚡ Monitoring instant: ${data.length} processes`);
+        event.sender.send('process-update', { success: true, data });
+      }
+    }).catch(() => {});
+    
+    // STEP 3: After 300ms, send CPU-enriched data
+    setTimeout(() => {
+      if (!event.sender.isDestroyed() && isStreamActive) {
+        getBestProcessData().then(data => {
+          if (data?.length > 0) {
+            console.log(`[Stream] ✅ Enriched: ${data.length} processes`);
+            event.sender.send('process-update', { success: true, data });
           }
-          
-          // Get fresh process data
-          const processes = await monitoringService.getProcessList({ fastMode: true });
-          event.sender.send('process-update', { 
-            success: true, 
-            data: processes
-          });
-        } else {
-          // Clean up if window is destroyed
-          clearInterval(processStreamInterval);
-          processStreamInterval = null;
-          isStreamActive = false;
-        }
-      } catch (error) {
-        console.error('[Process Stream] Error fetching processes:', error);
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('process-update', { success: false, error: error.message });
-        }
+        });
       }
-    };
+    }, 300);
     
-    // Start polling with stable 2s interval
-    processStreamInterval = setInterval(streamUpdate, currentPollInterval);
+    // STEP 4: Continuous polling every 2s for real-time updates
+    processStreamInterval = setInterval(async () => {
+      if (!event.sender.isDestroyed() && isStreamActive && isTabVisible) {
+        try {
+          const data = await getBestProcessData();
+          if (data?.length > 0) {
+            event.sender.send('process-update', { success: true, data });
+          }
+        } catch (e) {
+          console.error('[Stream] Poll error:', e);
+        }
+      } else if (event.sender.isDestroyed()) {
+        clearInterval(processStreamInterval);
+        isStreamActive = false;
+      }
+    }, currentPollInterval);
     
-    console.log(`[Process Stream] Stream started successfully (${currentPollInterval}ms interval)`);
-    return { success: true, message: 'Process stream started' };
+    return { success: true, message: 'Stream started' };
   } catch (error) {
     console.error('[Process Stream] Error starting stream:', error);
     isStreamActive = false;

@@ -294,19 +294,63 @@ class OptimizerService {
    */
   async endProcessByName(processName) {
     try {
-      // On Windows, use taskkill to terminate all processes with that name
+      // On Windows, use taskkill with spawn to avoid shell quoting issues
       if (process.platform === 'win32') {
-        const { stdout, stderr } = await execAsync(`taskkill /F /IM "${processName}" /T`, {
-          timeout: 5000,
-          windowsHide: true
+        return new Promise((resolve) => {
+          const { spawn } = require('child_process');
+          const taskkill = spawn('taskkill', ['/F', '/IM', processName, '/T'], {
+            windowsHide: true
+          });
+          
+          let stdout = '';
+          let stderr = '';
+          
+          taskkill.stdout.on('data', (data) => { stdout += data.toString(); });
+          taskkill.stderr.on('data', (data) => { stderr += data.toString(); });
+          
+          const timeout = setTimeout(() => {
+            taskkill.kill();
+            resolve({
+              success: false,
+              processName,
+              message: `Timeout while terminating "${processName}"`
+            });
+          }, 5000);
+          
+          taskkill.on('close', (code) => {
+            clearTimeout(timeout);
+            if (code === 0) {
+              resolve({
+                success: true,
+                processName,
+                message: `All processes matching "${processName}" terminated successfully`,
+                output: stdout
+              });
+            } else if (stderr.includes('not found') || stdout.includes('not found') || code === 128) {
+              resolve({
+                success: true,
+                processName,
+                message: `No processes found matching "${processName}"`,
+                alreadyTerminated: true
+              });
+            } else {
+              resolve({
+                success: false,
+                processName,
+                message: `Failed to terminate "${processName}": ${stderr || stdout || 'Unknown error'}`
+              });
+            }
+          });
+          
+          taskkill.on('error', (err) => {
+            clearTimeout(timeout);
+            resolve({
+              success: false,
+              processName,
+              message: `Failed to terminate "${processName}": ${err.message}`
+            });
+          });
         });
-        
-        return {
-          success: true,
-          processName,
-          message: `All processes matching "${processName}" terminated successfully`,
-          output: stdout
-        };
       } else {
         // On Unix-like systems, use pkill
         const { stdout, stderr } = await execAsync(`pkill -9 "${processName}"`, {

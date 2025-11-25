@@ -15,38 +15,54 @@ const path = require('path');
 
 const execAsync = promisify(exec);
 
-// Fast Windows-native process fetcher
+// Fast Windows-native process fetcher with improved timeout handling
 const getWindowsProcesses = () => {
   return new Promise((resolve, reject) => {
-    // Use Windows tasklist for instant results
-    exec('tasklist /FO CSV /NH', { timeout: 2000, maxBuffer: 5 * 1024 * 1024 }, (error, stdout) => {
+    // Use Windows tasklist for instant results with tight timeout
+    const tasklistTimeout = setTimeout(() => {
+      console.warn('[getWindowsProcesses] tasklist command timed out');
+      resolve([]); // Return empty array on timeout instead of rejecting
+    }, 1500);
+    
+    exec('tasklist /FO CSV /NH', { timeout: 1500, maxBuffer: 5 * 1024 * 1024 }, (error, stdout) => {
+      clearTimeout(tasklistTimeout);
+      
       if (error) {
-        reject(error);
+        console.error('[getWindowsProcesses] Error:', error.message);
+        resolve([]); // Return empty array on error instead of rejecting
         return;
       }
       
       try {
         const processes = [];
         const lines = stdout.trim().split('\n');
+        const totalMem = os.totalmem();
         
         for (const line of lines) {
           const match = line.match(/"([^"]+)","([^"]+)","([^"]+)","([^"]+)","([^"]+)"/);
           if (match) {
             const [, name, pid, sessionName, sessionNum, memUsage] = match;
             const memBytes = parseInt(memUsage.replace(/[^0-9]/g, '')) * 1024;
+            const parsedPid = parseInt(pid);
+            
+            // Skip invalid entries
+            if (isNaN(parsedPid) || parsedPid <= 0) continue;
+            
             processes.push({
               name: name,
-              pid: parseInt(pid),
+              pid: parsedPid,
               memory: memBytes,
-              memoryPercent: (memBytes / os.totalmem() * 100).toFixed(2),
+              memoryPercent: ((memBytes / totalMem) * 100).toFixed(2),
               cpu: 0 // Will be filled by pidusage
             });
           }
         }
         
+        console.log(`[getWindowsProcesses] Parsed ${processes.length} processes`);
         resolve(processes);
       } catch (parseError) {
-        reject(parseError);
+        console.error('[getWindowsProcesses] Parse error:', parseError.message);
+        resolve([]); // Return empty array on parse error
       }
     });
   });
@@ -331,12 +347,27 @@ class MonitoringService {
    * @param {Object} options - Options for fetching processes
    * @param {boolean} options.fastMode - Use fast mode (default: false)
    * @param {boolean} options.force - Force fresh fetch, bypass cache (default: false)
+   * @param {boolean} options.enrichCpu - Wait for CPU enrichment (default: false)
+   * @param {boolean} options.instant - Return INSTANTLY with just tasklist data, no CPU (default: false)
+   * @param {boolean} options.freshFetch - Do a completely fresh fetch with CPU sampling (default: false)
    * @returns {Promise<Array>} Complete list of all running processes
    */
   async getProcessList(options = {}) {
-    const { fastMode = false, force = false } = options;
+    const { fastMode = false, force = false, enrichCpu = false, instant = false, freshFetch = false } = options;
     const now = Date.now();
     const timeSinceLastFetch = now - this.lastProcessFetch;
+    
+    // INSTANT MODE: Return data immediately without any CPU sampling
+    if (instant) {
+      console.log('[Process List] ⚡ INSTANT MODE - returning tasklist data immediately');
+      return await this.fetchProcessesInstant();
+    }
+    
+    // FRESH FETCH MODE: Always do a new fetch with CPU sampling
+    if (freshFetch || (force && enrichCpu)) {
+      console.log('[Process List] 🔄 FRESH FETCH with CPU sampling');
+      return await this.fetchProcessesFast(true); // true = enrich CPU
+    }
     
     // If force flag is set, trigger background refresh but return cache immediately
     if (force) {
@@ -380,80 +411,46 @@ class MonitoringService {
     
     // Perform fresh fetch (only if no cache and not already fetching)
     console.log('[Process List] 🚀 Starting fresh fetch (no cache available)');
-    return await this.fetchProcessesFast();
+    return await this.fetchProcessesFast(true); // Always enrich CPU on initial
   }
 
   /**
    * Fast process fetch using Windows native command + selective pidusage
+   * @param {boolean} enrichCpu - If true, sample CPU (adds ~200-500ms)
    */
-  async fetchProcessesFast() {
+  async fetchProcessesFast(enrichCpu = false) {
     this.isProcessFetching = true;
     this.lastProcessFetch = Date.now();
     const startTime = Date.now();
     
     try {
-      console.log('[Process List] 🚀 Starting FAST fetch...');
-      
-      // Method 1: Use Windows tasklist (INSTANT - ~50-100ms)
-      let processList = [];
-      try {
-        processList = await getWindowsProcesses();
-        console.log(`[Process List] ⚡ Got ${processList.length} processes from tasklist in ${Date.now() - startTime}ms`);
-      } catch (err) {
-        console.warn('[Process List] Tasklist failed, falling back to systeminformation');
-        const siProcs = await si.processes();
-        processList = (siProcs.list || []).map(p => ({
-          name: p.name,
-          pid: p.pid,
-          memory: p.mem || 0,
-          memoryPercent: p.memVsTotal?.toFixed(2) || '0.00',
-          cpu: p.cpu || 0
-        }));
-      }
-      
-      // Sort by memory first for instant display
+      // Get process list from tasklist
+      let processList = await getWindowsProcesses();
       processList.sort((a, b) => b.memory - a.memory);
       
-      // Get top 50 PIDs by memory for CPU sampling
-      const topPids = processList
-        .slice(0, 50)
-        .map(p => p.pid)
-        .filter(pid => pid > 0);
+      // Get PIDs for CPU sampling
+      const topPids = processList.slice(0, 80).map(p => p.pid).filter(pid => pid > 0);
       
-      console.log(`[Process List] Sampling CPU for top ${topPids.length} processes...`);
-      
-      // Get CPU stats with short timeout for fast response
+      // Sample CPU if requested
       let cpuStats = {};
-      
-      if (topPids.length > 0) {
+      if (enrichCpu && topPids.length > 0) {
         try {
-          // Use shorter timeout (400ms) for instant display
-          const cpuPromise = pidusage(topPids);
-          const timeoutPromise = new Promise((resolve) => setTimeout(() => {
-            console.warn('[Process List] CPU sampling timeout after 400ms');
-            resolve({});
-          }, 400));
-          
-          cpuStats = await Promise.race([cpuPromise, timeoutPromise]);
-          
-          // Check if we got valid data
-          const validStats = Object.keys(cpuStats).length;
-          if (validStats > 0) {
-            console.log(`[Process List] ✅ Got CPU stats for ${validStats} processes in ${Date.now() - startTime}ms`);
-          } else {
-            console.warn('[Process List] ⚠️ No CPU data returned, processes will show 0.00%');
-          }
-        } catch (err) {
-          console.error('[Process List] pidusage error:', err.message);
-          // Continue without CPU data rather than failing completely
+          cpuStats = await Promise.race([
+            pidusage(topPids),
+            new Promise(resolve => setTimeout(() => resolve({}), 1000))
+          ]);
+        } catch (e) {
+          // Silent fail - continue without CPU
         }
       }
       
-      // Merge CPU data and format
+      // Format results
+      const totalMem = os.totalmem();
       const formattedProcesses = processList.map(proc => {
         const cpuData = cpuStats[proc.pid];
-        const cpuValue = cpuData?.cpu || proc.cpu || 0;
+        const cpuValue = cpuData?.cpu || 0;
         const memValue = cpuData?.memory || proc.memory || 0;
+        const memPercent = (memValue / totalMem) * 100;
         
         return {
           pid: proc.pid,
@@ -462,35 +459,90 @@ class MonitoringService {
           cpuPercent: cpuValue,
           memory: memValue,
           memoryFormatted: (memValue / 1024 / 1024).toFixed(1) + ' MB',
-          memoryPercent: (memValue / os.totalmem() * 100).toFixed(2),
-          memoryPercentNum: (memValue / os.totalmem() * 100),
+          memoryPercent: memPercent.toFixed(2),
+          memoryPercentNum: memPercent,
           priority: 'Normal',
           state: 'running',
-          started: '',
           command: proc.name,
-          user: '',
           timestamp: Date.now()
         };
       }).sort((a, b) => {
-        // Sort by CPU first, then memory
         const cpuDiff = b.cpuPercent - a.cpuPercent;
-        if (Math.abs(cpuDiff) > 0.01) return cpuDiff;
+        if (Math.abs(cpuDiff) > 0.1) return cpuDiff;
         return b.memoryPercentNum - a.memoryPercentNum;
       });
       
       this.cachedProcessList = formattedProcesses;
-      const totalTime = Date.now() - startTime;
-      
-      console.log(`[Process List] ✅ FAST fetch completed in ${totalTime}ms (${formattedProcesses.length} processes)`);
-      console.log(`[Process List] Top 5: ${formattedProcesses.slice(0, 5).map(p => `${p.name}(${p.cpu}%)`).join(', ')}`);
-      
+      console.log(`[Process List] ✅ ${formattedProcesses.length} processes in ${Date.now() - startTime}ms`);
       return formattedProcesses;
       
     } catch (error) {
-      console.error('[Process List] Fast fetch error:', error.message);
+      console.error('[Process List] Error:', error.message);
       return this.cachedProcessList;
     } finally {
       this.isProcessFetching = false;
+    }
+  }
+
+  /**
+   * INSTANT process fetch - just tasklist, NO CPU sampling
+   * Returns in ~50-100ms for immediate UI display
+   * Never throws - always returns an array (empty if error)
+   */
+  async fetchProcessesInstant() {
+    const startTime = Date.now();
+    
+    try {
+      // Use Windows tasklist only - no CPU sampling, pure speed
+      let processList = await getWindowsProcesses();
+      
+      // If tasklist returned empty, try returning cache
+      if (!processList || processList.length === 0) {
+        console.log('[Process List] ⚡ INSTANT: No processes from tasklist, using cache');
+        return this.cachedProcessList.length > 0 ? this.cachedProcessList : [];
+      }
+      
+      // Sort by memory
+      processList.sort((a, b) => b.memory - a.memory);
+      
+      // Format with memory data only - CPU will come from stream
+      const totalMem = os.totalmem();
+      const formattedProcesses = processList.map(proc => {
+        const memValue = proc.memory || 0;
+        const memPercent = (memValue / totalMem) * 100;
+        
+        // Use cached CPU if available, otherwise show 0
+        const cachedProc = this.cachedProcessList.find(p => p.pid === proc.pid);
+        const cpuValue = cachedProc?.cpuPercent || 0;
+        
+        return {
+          pid: proc.pid,
+          name: proc.name,
+          cpu: cpuValue.toFixed(2),
+          cpuPercent: cpuValue,
+          memory: memValue,
+          memoryFormatted: (memValue / 1024 / 1024).toFixed(1) + ' MB',
+          memoryPercent: memPercent.toFixed(2),
+          memoryPercentNum: memPercent,
+          priority: 'Normal',
+          state: 'running',
+          command: proc.name,
+          timestamp: Date.now()
+        };
+      }).sort((a, b) => b.memoryPercentNum - a.memoryPercentNum);
+      
+      // Update cache with instant data
+      if (formattedProcesses.length > 0) {
+        this.cachedProcessList = formattedProcesses;
+      }
+      
+      console.log(`[Process List] ⚡ INSTANT: ${formattedProcesses.length} processes in ${Date.now() - startTime}ms`);
+      return formattedProcesses;
+      
+    } catch (error) {
+      console.error('[Process List] Instant fetch error:', error.message);
+      // Always return something - never throw
+      return this.cachedProcessList.length > 0 ? this.cachedProcessList : [];
     }
   }
 
@@ -499,11 +551,7 @@ class MonitoringService {
    */
   refreshProcessesInBackground() {
     if (this.isProcessFetching) return;
-    
-    // Don't await - fire and forget
-    this.fetchProcessesFast().catch(err => {
-      console.error('[Process List] Background refresh error:', err.message);
-    });
+    this.fetchProcessesFast(true).catch(() => {});
   }
 
   /**

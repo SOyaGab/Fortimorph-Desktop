@@ -32,6 +32,7 @@ const Dashboard = () => {
   const [showAllFiles, setShowAllFiles] = useState(true); // Show all files by default
   const [showAllProcesses, setShowAllProcesses] = useState(false); // Show all processes or just top 20
   const [isRefreshingProcesses, setIsRefreshingProcesses] = useState(false);
+  const [isProcessesInitialLoading, setIsProcessesInitialLoading] = useState(false); // Start as false - never block UI
   const [fileSizeFilter, setFileSizeFilter] = useState('large'); // 'large', 'small', or 'all'
   const [processSearchTerm, setProcessSearchTerm] = useState(''); // Search filter for processes
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(''); // Debounced search term
@@ -117,62 +118,35 @@ const Dashboard = () => {
     }
   };
 
-  // Fetch process list (manual refresh) - Smart refresh without blocking
+  // Fetch process list (manual refresh) - Force fresh data with CPU enrichment
   const fetchProcesses = async () => {
     if (isRefreshingProcesses) return; // Prevent double-click
     
     setIsRefreshingProcesses(true);
-    console.log('[Dashboard] 🔄 Manual refresh - triggering background update');
+    console.log('[Dashboard] 🔄 Manual refresh triggered');
     
     try {
-      // Don't use force flag - just get fresh data with normal flow
-      const result = await window.electronAPI.system.getProcesses({ force: true });
+      // First get instant data for immediate visual feedback
+      const instantResult = await window.electronAPI.system.getProcesses({ instant: true });
+      if (instantResult.success && instantResult.data?.length > 0) {
+        setProcesses(instantResult.data);
+        console.log('[Dashboard] ⚡ Instant refresh:', instantResult.data.length, 'processes');
+      }
       
-      console.log('[Dashboard] ✅ Refresh completed:', {
-        success: result.success,
-        processCount: result.data?.length
-      });
-      
-      if (result.success && result.data && result.data.length > 0) {
-        setProcesses(result.data);
-        console.log('[Dashboard] ✅ Updated UI with', result.data.length, 'processes');
-      } else {
-        console.error('[Dashboard] ❌ Invalid data received:', result);
+      // Then get CPU-enriched data for accurate percentages
+      const enrichedResult = await window.electronAPI.system.getProcesses({ freshFetch: true });
+      if (enrichedResult.success && enrichedResult.data?.length > 0) {
+        setProcesses(enrichedResult.data);
+        console.log('[Dashboard] ✅ Enriched refresh:', enrichedResult.data.length, 'processes');
       }
     } catch (error) {
       console.error('[Dashboard] ❌ Refresh error:', error);
-      // Don't show alert for refresh failures - just log it
-      console.warn('Refresh failed, keeping current data');
     } finally {
       setIsRefreshingProcesses(false);
     }
   };
 
-  // Load processes when Processes tab is selected - INSTANT with cache
-  useEffect(() => {
-    if (selectedView !== 'processes') {
-      return;
-    }
-    
-    console.log('📋 Processes view selected - loading from cache');
-    
-    // Load cached data immediately for instant display
-    const loadInitialProcesses = async () => {
-      try {
-        // Use cached data for instant display (no force flag)
-        const result = await window.electronAPI.system.getProcesses();
-        if (result.success && result.data && result.data.length > 0) {
-          console.log('⚡ Got processes from cache:', result.data.length);
-          setProcesses(result.data);
-        }
-      } catch (error) {
-        console.error('Error loading processes:', error);
-      }
-    };
-    
-    // Execute immediately
-    loadInitialProcesses();
-  }, [selectedView]);
+  // Note: Process loading is handled in the streaming useEffect below for better coordination
 
   // Fetch optimization suggestions
   const fetchSuggestions = async () => {
@@ -302,56 +276,69 @@ const Dashboard = () => {
     return () => clearInterval(timer);
   }, []);
   
-  // Real-time process streaming when Processes tab is active
+  // Real-time process streaming when Processes tab is active - ROBUST implementation
   useEffect(() => {
     if (selectedView !== 'processes') {
       // Stop streaming when leaving processes view
-      window.electronAPI.system.stopProcessStream().catch(err => 
-        console.error('Error stopping stream:', err)
-      );
+      window.electronAPI.system.stopProcessStream().catch(() => {});
       window.electronAPI.system.setTabVisibility(false);
       return;
     }
     
-    console.log('Processes view selected - starting stream');
+    console.log('[Processes] Tab selected - starting ROBUST loading');
     window.electronAPI.system.setTabVisibility(true);
     
-    // Set up listener for process updates
+    let isMounted = true;
+    
+    // IMMEDIATE: Set up stream listener FIRST before any API calls
     const handleProcessUpdate = (result) => {
-      if (result.success && result.data && Array.isArray(result.data) && result.data.length > 0) {
-        // Log first update to verify data quality
-        if (processes.length === 0) {
-          console.log('[Dashboard] First process data received:', {
-            count: result.data.length,
-            samples: result.data.slice(0, 3).map(p => ({ 
-              name: p.name, 
-              cpu: p.cpu, 
-              cpuPercent: p.cpuPercent,
-              memory: p.memoryPercent 
-            }))
-          });
-        }
+      if (!isMounted) return;
+      if (result?.success && Array.isArray(result.data) && result.data.length > 0) {
+        console.log('[Processes] Stream update:', result.data.length, 'processes');
         setProcesses(result.data);
-      } else {
-        console.warn('[Dashboard] Invalid process update:', result);
       }
     };
     
     window.electronAPI.system.onProcessUpdate(handleProcessUpdate);
     
-    // Start the stream
-    window.electronAPI.system.startProcessStream()
+    // Fire all data loading in parallel - don't wait for anything
+    // Method 1: Direct instant fetch
+    window.electronAPI.system.getProcesses({ instant: true })
       .then(result => {
-        if (result.success) {
-          console.log('Process stream started');
+        if (isMounted && result?.success && result.data?.length > 0) {
+          console.log('[Processes] ⚡ Direct instant:', result.data.length);
+          setProcesses(result.data);
         }
       })
-      .catch(error => {
-        console.error('Failed to start process stream:', error);
-      });
+      .catch(err => console.warn('[Processes] Direct instant error:', err));
     
-    // Cleanup function
+    // Method 2: Start stream (also sends instant data)
+    window.electronAPI.system.startProcessStream()
+      .then(result => {
+        if (result?.success) {
+          console.log('[Processes] Stream started');
+        }
+      })
+      .catch(err => console.warn('[Processes] Stream start error:', err));
+    
+    // Method 3: Fallback - fetch with CPU enrichment after 500ms
+    const fallbackTimer = setTimeout(() => {
+      if (isMounted) {
+        window.electronAPI.system.getProcesses({ freshFetch: true })
+          .then(result => {
+            if (isMounted && result?.success && result.data?.length > 0) {
+              console.log('[Processes] Fallback fetch:', result.data.length);
+              setProcesses(result.data);
+            }
+          })
+          .catch(() => {});
+      }
+    }, 500);
+    
+    // Cleanup
     return () => {
+      isMounted = false;
+      clearTimeout(fallbackTimer);
       window.electronAPI.system.stopProcessStream().catch(() => {});
       window.electronAPI.system.removeProcessUpdateListener();
       window.electronAPI.system.setTabVisibility(false);
@@ -1172,7 +1159,7 @@ const Dashboard = () => {
                 onClick={fetchProcesses}
                 disabled={isRefreshingProcesses}
                 className={`px-4 py-2 rounded transition-all duration-300 transform flex items-center gap-2 ${
-                  isRefreshingProcesses 
+                  isRefreshingProcesses
                     ? 'bg-[#0096E0]/50 text-white/70 cursor-not-allowed' 
                     : 'bg-[#0077B6] hover:bg-[#0096E0] text-white hover:scale-105'
                 }`}
@@ -1280,32 +1267,15 @@ const Dashboard = () => {
               </table>
             </div>
           ) : (
-            <div className="animate-pulse">
-              <table className="w-full text-white">
-                <thead>
-                  <tr className="border-b-2 border-[#0077B6]">
-                    <th className="text-left py-2 px-4">PID</th>
-                    <th className="text-left py-2 px-4">Name</th>
-                    <th className="text-right py-2 px-4">CPU %</th>
-                    <th className="text-right py-2 px-4">Memory</th>
-                    <th className="text-right py-2 px-4">Memory %</th>
-                    <th className="text-center py-2 px-4">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[...Array(10)].map((_, i) => (
-                    <tr key={i} className="border-b border-[#0077B6]">
-                      <td className="py-2 px-4"><div className="h-4 bg-[#0077B6] rounded w-12"></div></td>
-                      <td className="py-2 px-4"><div className="h-4 bg-[#0077B6] rounded w-32"></div></td>
-                      <td className="py-2 px-4"><div className="h-4 bg-[#0077B6] rounded w-12 ml-auto"></div></td>
-                      <td className="py-2 px-4"><div className="h-4 bg-[#0077B6] rounded w-20 ml-auto"></div></td>
-                      <td className="py-2 px-4"><div className="h-4 bg-[#0077B6] rounded w-12 ml-auto"></div></td>
-                      <td className="py-2 px-4"><div className="h-8 bg-[#0077B6] rounded w-20 mx-auto"></div></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <div className="text-center text-gray-400 py-4 text-sm">Loading processes...</div>
+            <div className="text-center py-12">
+              <div className="inline-flex items-center gap-3 text-[#48CAE4]">
+                <svg className="animate-spin h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span className="text-lg">Fetching processes...</span>
+              </div>
+              <p className="text-gray-400 mt-2 text-sm">This should only take a moment</p>
             </div>
           )}
         </div>
