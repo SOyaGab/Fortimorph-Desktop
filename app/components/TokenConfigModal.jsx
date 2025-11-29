@@ -348,7 +348,7 @@ const TokenConfigModal = ({ isOpen, onClose, initialData = {}, onSuccess }) => {
                 <AlertTriangle className="w-8 h-8 text-black" />
               </div>
               <div>
-                <h3 className="text-2xl font-bold text-yellow-300 mb-2">⚠️ Permanent Token Warning</h3>
+                <h3 className="text-2xl font-bold text-yellow-300 mb-2 flex items-center gap-2"><AlertTriangle className="w-6 h-6" /> Permanent Token Warning</h3>
                 <p className="text-yellow-100 text-base leading-relaxed">
                   This token will <strong className="text-white text-lg">never expire</strong>. 
                   It can be used indefinitely unless manually deleted. 

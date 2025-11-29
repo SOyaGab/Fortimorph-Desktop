@@ -4,7 +4,7 @@ import {
   Battery, BatteryCharging, Zap, TrendingUp, TrendingDown, 
   AlertTriangle, AlertCircle, Info, Clock, Cpu, MemoryStick,
   Calendar, CalendarDays, BarChart3, Activity, Trash2, RefreshCw,
-  Settings, X, Check, ChevronDown, ChevronUp
+  Settings, X, Check, ChevronDown, ChevronUp, Lightbulb, Thermometer, Heart, RotateCcw
 } from 'lucide-react';
 
 /**
@@ -932,7 +932,7 @@ const BatteryCenter = () => {
     return (
       <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-[#001D3D] via-[#003566] to-[#000814]">
         <div className="text-center max-w-md">
-          <div className="text-6xl mb-4">⚠️</div>
+          <div className="text-6xl mb-4 flex justify-center"><AlertTriangle className="w-16 h-16 text-yellow-500" /></div>
           <h2 className="text-2xl font-bold text-white mb-2">Error Loading Battery Data</h2>
           <p className="text-gray-400 mb-4">{error}</p>
           <button
@@ -1153,7 +1153,7 @@ const BatteryCenter = () => {
               <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
                 {getModeInfo(optimizationMode).benefits.map((benefit, idx) => (
                   <div key={idx} className="flex items-start gap-2">
-                    <span className="text-green-400 mt-0.5">✓</span>
+                    <Check className="w-4 h-4 text-green-400 mt-0.5 flex-shrink-0" />
                     <span className="text-sm text-gray-300">{benefit}</span>
                   </div>
                 ))}
@@ -1184,8 +1184,8 @@ const BatteryCenter = () => {
                 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="bg-gray-700/30 rounded-lg p-4">
-                    <label className="block text-sm font-semibold text-white mb-2">
-                      🔴 Critical Battery Level (%)
+                    <label className="block text-sm font-semibold text-white mb-2 flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 text-red-500" /> Critical Battery Level (%)
                     </label>
                     <input
                       type="number"
@@ -1202,8 +1202,8 @@ const BatteryCenter = () => {
                   </div>
                   
                   <div className="bg-gray-700/30 rounded-lg p-4">
-                    <label className="block text-sm font-semibold text-white mb-2">
-                      🟠 Low Battery Level (%)
+                    <label className="block text-sm font-semibold text-white mb-2 flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 text-orange-500" /> Low Battery Level (%)
                     </label>
                     <input
                       type="number"
@@ -1220,8 +1220,8 @@ const BatteryCenter = () => {
                   </div>
                   
                   <div className="bg-gray-700/30 rounded-lg p-4">
-                    <label className="block text-sm font-semibold text-white mb-2">
-                      🌡️ High Temperature (°C)
+                    <label className="block text-sm font-semibold text-white mb-2 flex items-center gap-2">
+                      <Thermometer className="w-4 h-4 text-red-400" /> High Temperature (°C)
                     </label>
                     <input
                       type="number"
@@ -1238,8 +1238,8 @@ const BatteryCenter = () => {
                   </div>
                   
                   <div className="bg-gray-700/30 rounded-lg p-4">
-                    <label className="block text-sm font-semibold text-white mb-2">
-                      ⚡ Rapid Drain (%/min)
+                    <label className="block text-sm font-semibold text-white mb-2 flex items-center gap-2">
+                      <Zap className="w-4 h-4 text-yellow-400" /> Rapid Drain (%/min)
                     </label>
                     <input
                       type="number"
@@ -1257,8 +1257,8 @@ const BatteryCenter = () => {
                   </div>
                   
                   <div className="bg-gray-700/30 rounded-lg p-4">
-                    <label className="block text-sm font-semibold text-white mb-2">
-                      ♻️ Cycle Warning Count
+                    <label className="block text-sm font-semibold text-white mb-2 flex items-center gap-2">
+                      <RotateCcw className="w-4 h-4 text-blue-400" /> Cycle Warning Count
                     </label>
                     <input
                       type="number"
@@ -1276,8 +1276,8 @@ const BatteryCenter = () => {
                   </div>
                   
                   <div className="bg-gray-700/30 rounded-lg p-4">
-                    <label className="block text-sm font-semibold text-white mb-2">
-                      💚 Health Warning (%)
+                    <label className="block text-sm font-semibold text-white mb-2 flex items-center gap-2">
+                      <Heart className="w-4 h-4 text-green-400" /> Health Warning (%)
                     </label>
                     <input
                       type="number"
@@ -1437,7 +1437,7 @@ const BatteryCenter = () => {
                   {optimizationResult.initialTemp && optimizationResult.targetTemp && 
                    optimizationResult.initialTemp !== 'N/A' && optimizationResult.targetTemp !== 'N/A' && (
                     <div className="bg-gradient-to-r from-blue-500/10 to-cyan-500/10 border border-blue-500/30 rounded-lg p-4 mt-4">
-                      <h4 className="text-blue-300 font-semibold mb-3">🌡️ Temperature Analysis</h4>
+                      <h4 className="text-blue-300 font-semibold mb-3 flex items-center gap-2"><Thermometer className="w-5 h-5" /> Temperature Analysis</h4>
                       <div className="grid grid-cols-3 gap-4 text-center">
                         <div>
                           <div className="text-2xl font-bold text-orange-400">
@@ -1594,7 +1594,7 @@ const BatteryCenter = () => {
                         <span className="text-gray-400">Status:</span>
                         <span className="text-white font-semibold">
                           {batteryData?.isCharging ? 
-                           <span className="text-blue-400">⚡ Charging</span> : 
+                           <span className="text-blue-400 flex items-center gap-1"><Zap className="w-4 h-4" /> Charging</span> : 
                            <span className="text-green-400">On Battery</span>}
                         </span>
                       </div>
@@ -1878,22 +1878,22 @@ const BatteryCenter = () => {
                     {/* Debug info with better visibility */}
                     {batteryData?.analytics && (
                       <div className="mt-4 text-sm bg-gray-800/70 border border-gray-600 rounded-lg p-3 max-w-md mx-auto">
-                        <div className="text-gray-300 mb-2">📊 <strong>Tracking Status:</strong></div>
+                        <div className="text-gray-300 mb-2 flex items-center gap-1"><BarChart3 className="w-4 h-4" /> <strong>Tracking Status:</strong></div>
                         <div className="text-left space-y-1 text-gray-400">
                           <div>• Processes tracked: <span className="text-white font-semibold">{batteryData.analytics.processTrackingSize || 0}</span></div>
                           <div>• With battery impact: <span className="text-white font-semibold">{batteryData.analytics.topProcesses?.length || 0}</span></div>
                           <div>• Battery history points: <span className="text-white font-semibold">{batteryData.analytics.batteryHistorySize || 0}</span></div>
                         </div>
                         {batteryData.analytics.error && (
-                          <div className="mt-2 text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded p-2">
-                            ⚠️ {batteryData.analytics.error}
+                          <div className="mt-2 text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded p-2 flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3" /> {batteryData.analytics.error}
                           </div>
                         )}
                       </div>
                     )}
                     
                     <div className="mt-4 bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 max-w-md mx-auto text-sm text-blue-300">
-                      <strong>💡 Tip:</strong> If this stays empty after 30 seconds, try refreshing or check console for errors.
+                      <span className="inline-flex items-center gap-1"><Lightbulb className="w-4 h-4" /> <strong>Tip:</strong></span> If this stays empty after 30 seconds, try refreshing or check console for errors.
                     </div>
                     
                     <div className="mt-4">
@@ -1902,9 +1902,9 @@ const BatteryCenter = () => {
                           console.log('Battery analytics:', batteryData?.analytics);
                           loadBatteryData();
                         }}
-                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm transition-colors"
+                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm transition-colors flex items-center gap-2"
                       >
-                        🔄 Refresh Data
+                        <RefreshCw className="w-4 h-4" /> Refresh Data
                       </button>
                     </div>
                   </div>
@@ -2210,7 +2210,7 @@ const BatteryCenter = () => {
                     Battery Discharge Analysis
                   </h3>
                   <div className="text-center py-6">
-                    <div className="text-4xl mb-2">⏳</div>
+                    <div className="text-4xl mb-2 flex justify-center"><Clock className="w-10 h-10 text-blue-400" /></div>
                     <p className="text-gray-400 font-semibold mb-2">Collecting discharge data...</p>
                     <p className="text-sm text-gray-500 mt-2 max-w-md mx-auto">
                       We need at least 2 battery measurements to calculate discharge rates. 
@@ -2220,8 +2220,8 @@ const BatteryCenter = () => {
                     {/* Show progress if we have battery trend data */}
                     {batteryTrend && batteryTrend.length > 0 && (
                       <div className="mt-4 bg-orange-500/10 border border-orange-500/30 rounded-lg p-3 max-w-sm mx-auto">
-                        <p className="text-sm text-orange-300 mb-1">
-                          ⏳ Progress: {batteryTrend.length}/2 measurements collected
+                        <p className="text-sm text-orange-300 mb-1 flex items-center justify-center gap-1">
+                          <Clock className="w-4 h-4" /> Progress: {batteryTrend.length}/2 measurements collected
                         </p>
                         <div className="w-full bg-gray-700 rounded-full h-2 mt-2">
                           <div
@@ -2233,15 +2233,15 @@ const BatteryCenter = () => {
                     )}
                     
                     <p className="text-xs text-gray-500 mt-3 max-w-md mx-auto">
-                      💡 <strong>Tip:</strong> Use your device on battery power (unplug charger) for more accurate discharge analysis.
+                      <span className="inline-flex items-center gap-1"><Lightbulb className="w-3 h-3" /> <strong>Tip:</strong></span> Use your device on battery power (unplug charger) for more accurate discharge analysis.
                     </p>
                     
                     <div className="mt-4">
                       <button
                         onClick={loadBatteryData}
-                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm transition-colors"
+                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm transition-colors flex items-center gap-2"
                       >
-                        🔄 Refresh Data
+                        <RefreshCw className="w-4 h-4" /> Refresh Data
                       </button>
                     </div>
                   </div>

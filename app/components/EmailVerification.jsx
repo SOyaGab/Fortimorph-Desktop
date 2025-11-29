@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Mail, CheckCircle, AlertCircle, Info, Clock, RefreshCw, ArrowLeft, Lightbulb } from 'lucide-react';
 
 function EmailVerification({ email, onVerificationSuccess, onBack }) {
   const [code, setCode] = useState('');
@@ -70,9 +71,7 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
         {/* Logo/Header */}
         <div className="text-center mb-8">
           <div className="w-16 h-16 bg-gradient-to-br from-ocean-primary to-ocean-surface rounded-xl flex items-center justify-center mx-auto mb-4 shadow-ocean-lg">
-            <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-            </svg>
+            <Mail className="w-8 h-8 text-white" />
           </div>
           <h1 className="text-3xl font-bold text-white mb-2">Verify Your Email</h1>
           <p className="text-ocean-surface text-sm">
@@ -87,19 +86,7 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
           {success ? (
             <div className="text-center py-8 animate-fadeIn">
               <div className="w-20 h-20 bg-ocean-success/20 rounded-full flex items-center justify-center mx-auto mb-4 animate-pulse-custom">
-                <svg
-                  className="w-10 h-10 text-ocean-success"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2.5}
-                    d="M5 13l4 4L19 7"
-                  />
-                </svg>
+                <CheckCircle className="w-10 h-10 text-ocean-success" />
               </div>
               <h3 className="text-xl font-semibold text-ocean-success mb-2">Email Verified!</h3>
               <p className="text-ocean-surface">Redirecting to login...</p>
@@ -109,9 +96,7 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
               {error && (
                 <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 animate-fadeIn">
                   <div className="flex items-center space-x-2">
-                    <svg className="w-5 h-5 text-red-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
+                    <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0" />
                     <p className="text-red-400 text-sm">{error}</p>
                   </div>
                 </div>
@@ -120,9 +105,7 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
               <div className="bg-ocean-primary/10 border border-ocean-primary/30 rounded-lg p-4">
                 <div className="flex items-start space-x-3">
                   <div className="flex-shrink-0 mt-0.5">
-                    <svg className="w-5 h-5 text-ocean-surface" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
+                    <Info className="w-5 h-5 text-ocean-surface" />
                   </div>
                   <div className="flex-1">
                     <h3 className="text-sm font-semibold text-ocean-surface mb-1">
@@ -168,9 +151,7 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
                   </>
                 ) : (
                   <>
-                    <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
+                    <CheckCircle className="w-5 h-5 mr-2" />
                     Verify Email
                   </>
                 )}
@@ -191,16 +172,12 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
                     </>
                   ) : cooldown > 0 ? (
                     <>
-                      <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
+                      <Clock className="w-4 h-4 mr-1" />
                       Resend in {cooldown}s
                     </>
                   ) : (
                     <>
-                      <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
+                      <RefreshCw className="w-4 h-4 mr-1" />
                       Resend Code
                     </>
                   )}
@@ -216,9 +193,7 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
                 className="text-sm text-gray-400 hover:text-ocean-surface transition-colors inline-flex items-center font-medium"
                 disabled={loading}
               >
-                <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                </svg>
+                <ArrowLeft className="w-4 h-4 mr-1" />
                 Back to signup
               </button>
             </div>
@@ -228,9 +203,7 @@ function EmailVerification({ email, onVerificationSuccess, onBack }) {
         {/* Helpful Tip */}
         <div className="mt-6 p-4 bg-ocean-warning/10 border border-ocean-warning/30 rounded-lg animate-fadeIn">
           <div className="flex items-start space-x-3">
-            <svg className="w-5 h-5 text-ocean-warning flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-            </svg>
+            <Lightbulb className="w-5 h-5 text-ocean-warning flex-shrink-0 mt-0.5" />
             <p className="text-xs text-ocean-warning leading-relaxed">
               <strong>Tip:</strong> Check your spam or junk folder if you don&apos;t see the email. The code expires in 10 minutes.
             </p>

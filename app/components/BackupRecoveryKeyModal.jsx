@@ -16,7 +16,10 @@ import {
   AlertTriangle,
   Clock,
   Infinity,
-  Info
+  Info,
+  Check,
+  Smartphone,
+  Lightbulb
 } from 'lucide-react';
 
 const BackupRecoveryKeyModal = ({ isOpen, onClose, backup, onSuccess }) => {
@@ -125,7 +128,7 @@ const BackupRecoveryKeyModal = ({ isOpen, onClose, backup, onSuccess }) => {
                 <AlertTriangle className="w-8 h-8 text-black" />
               </div>
               <div>
-                <h3 className="text-2xl font-bold text-yellow-300 mb-2">⚠️ Permanent Key</h3>
+                <h3 className="text-2xl font-bold text-yellow-300 mb-2 flex items-center gap-2"><AlertTriangle className="w-6 h-6" /> Permanent Key</h3>
                 <p className="text-yellow-100 text-sm leading-relaxed">
                   This recovery key will <strong className="text-white">never expire</strong>. 
                   Anyone with this key can restore your backup at any time. 
@@ -137,9 +140,9 @@ const BackupRecoveryKeyModal = ({ isOpen, onClose, backup, onSuccess }) => {
             <div className="flex flex-col gap-3">
               <button
                 onClick={() => handleGenerate(true)}
-                className="w-full px-6 py-3 bg-yellow-500 hover:bg-yellow-600 text-black font-bold rounded-lg transition"
+                className="w-full px-6 py-3 bg-yellow-500 hover:bg-yellow-600 text-black font-bold rounded-lg transition flex items-center justify-center gap-2"
               >
-                ✓ Create Permanent Key
+                <Check className="w-5 h-5" /> Create Permanent Key
               </button>
               <button
                 onClick={() => setShowPermanentWarning(false)}
@@ -297,11 +300,11 @@ const BackupRecoveryKeyModal = ({ isOpen, onClose, backup, onSuccess }) => {
                     <Info className="w-5 h-5 text-purple-400" />
                     Transfer Options
                   </h4>
-                  <p className="text-purple-200 text-sm mb-3">
-                    📱 <strong>Scan QR code</strong> with another device to instantly receive this recovery key via Bluetooth
+                  <p className="text-purple-200 text-sm mb-3 flex items-center gap-1">
+                    <Smartphone className="w-4 h-4" /> <strong>Scan QR code</strong> with another device to instantly receive this recovery key via Bluetooth
                   </p>
-                  <p className="text-gray-300 text-xs">
-                    💡 The QR code contains the recovery key and Bluetooth pairing info. No additional buttons needed!
+                  <p className="text-gray-300 text-xs flex items-center gap-1">
+                    <Lightbulb className="w-3 h-3" /> The QR code contains the recovery key and Bluetooth pairing info. No additional buttons needed!
                   </p>
                 </div>
 
@@ -403,8 +406,8 @@ const BackupRecoveryKeyModal = ({ isOpen, onClose, backup, onSuccess }) => {
                           <Infinity className="w-4 h-4 text-blue-400" />
                           <span className="text-white font-medium">Permanent Key</span>
                         </div>
-                        <p className="text-sm text-gray-400">
-                          Never expires. Use for long-term backup archives. ⚠️ Less secure.
+                        <p className="text-sm text-gray-400 flex items-center gap-1">
+                          Never expires. Use for long-term backup archives. <AlertTriangle className="w-4 h-4 text-yellow-500" /> Less secure.
                         </p>
                       </div>
                     </label>

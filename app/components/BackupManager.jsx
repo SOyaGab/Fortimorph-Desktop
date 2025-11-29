@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, memo } from 'react';
-import { FolderOpen, Save, RefreshCw, Trash2, CheckCircle, AlertCircle, Download, HardDrive, Lock, Unlock, QrCode, Copy } from 'lucide-react';
+import { FolderOpen, Save, RefreshCw, Trash2, CheckCircle, AlertCircle, Download, HardDrive, Lock, Unlock, QrCode, Copy, Search } from 'lucide-react';
 import TokenConfigModal from './TokenConfigModal';
 import BackupRecoveryKeyModal from './BackupRecoveryKeyModal'; // OPTION B: Simplified modal
 import DeletedFilesManager from './DeletedFilesManager';
@@ -883,7 +883,7 @@ export default function BackupManager() {
               <div className="p-2 bg-blue-500/20 rounded-lg">
                 <CheckCircle className="w-6 h-6 text-blue-400" />
               </div>
-              <h3 className="text-xl font-bold text-white">🔍 Verify Backup</h3>
+              <h3 className="text-xl font-bold text-white flex items-center gap-2"><Search className="w-5 h-5" /> Verify Backup</h3>
             </div>
 
             {/* Modal Content */}

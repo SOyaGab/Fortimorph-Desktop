@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { Loader2, RefreshCw, Search, AlertTriangle, FolderOpen, Folder, Trash2, List, LayoutGrid, ExternalLink, FileText } from 'lucide-react';
 
 const MAX_CHART_POINTS = 180; // Keep roughly six minutes of data on screen
 const formatTimeLabel = (timestamp) =>
@@ -246,6 +247,16 @@ const Dashboard = () => {
       try {
         // Fetch metrics in background - UI is already visible
         await fetchMetrics();
+        
+        // Pre-fetch storage data in background for instant loading when user navigates to Storage tab
+        console.log('🚀 Pre-loading storage data in background...');
+        // Run both in parallel for faster loading
+        Promise.all([
+          fetchInstalledApps(true).catch(err => console.warn('Background apps fetch error:', err)),
+          fetchStorageAnalysis(100).catch(err => console.warn('Background storage fetch error:', err))
+        ]).then(() => {
+          console.log('✅ Storage data pre-loaded successfully');
+        });
       } catch (err) {
         console.error('Initialization error:', err);
         setError('Failed to initialize dashboard');
@@ -345,13 +356,22 @@ const Dashboard = () => {
     };
   }, [selectedView]);
 
-  // Auto-fetch installed apps when switching to storage view - ONE TIME ONLY
+  // Auto-fetch installed apps AND storage analysis when switching to storage view - ONE TIME ONLY
   useEffect(() => {
-    if (selectedView === 'storage' && installedApps.length === 0 && !loading && !isLoadingApps) {
-      console.log('💾 Storage view selected - loading installed apps (one time)');
-      fetchInstalledApps(true);
+    if (selectedView === 'storage' && !loading) {
+      // Auto-load installed apps if not already loaded
+      if (installedApps.length === 0 && !isLoadingApps) {
+        console.log('💾 Storage view selected - loading installed apps (one time)');
+        fetchInstalledApps(true);
+      }
+      // Auto-load storage analysis if not already loaded
+      if (!storageAnalysis && !isLoadingStorage) {
+        console.log('💾 Storage view selected - loading storage analysis (one time)');
+        // Default to 'large' filter (100 MB) for initial auto-scan
+        fetchStorageAnalysis(100);
+      }
     }
-  }, [selectedView, loading, installedApps.length, isLoadingApps]);
+  }, [selectedView, loading, installedApps.length, isLoadingApps, storageAnalysis, isLoadingStorage]);
 
   // Handle optimize button
   const handleOptimize = async () => {
@@ -614,7 +634,7 @@ const Dashboard = () => {
     return (
       <div className="min-h-screen bg-gradient-to-br from-[#001D3D] via-[#003566] to-[#000814] flex items-center justify-center p-6">
         <div className="bg-[#003566] rounded-lg p-8 border-2 border-red-500 max-w-md">
-          <h2 className="text-red-500 text-2xl font-bold mb-4">⚠️ Error Loading Metrics</h2>
+          <h2 className="text-red-500 text-2xl font-bold mb-4 flex items-center gap-2"><AlertTriangle className="w-7 h-7" /> Error Loading Metrics</h2>
           <p className="text-white mb-4">{error}</p>
           <button
             onClick={() => {
@@ -641,7 +661,7 @@ const Dashboard = () => {
       {/* Suggestions Banner */}
       {suggestions.length > 0 && (
         <div className="mb-6 bg-[#FFD60A] bg-opacity-20 border-2 border-[#FFD60A] rounded-lg p-4">
-          <h3 className="text-[#FFD60A] font-bold mb-2">⚠️ Optimization Suggestions</h3>
+          <h3 className="text-[#FFD60A] font-bold mb-2 flex items-center gap-2"><AlertTriangle className="w-5 h-5" /> Optimization Suggestions</h3>
           <div className="space-y-2">
             {suggestions.map((suggestion, index) => (
               <div key={index} className="text-white text-sm">
@@ -910,10 +930,7 @@ const Dashboard = () => {
             >
               {isOptimizing ? (
                 <span className="flex items-center">
-                  <svg className="animate-spin h-5 w-5 mr-3" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
+                  <Loader2 className="animate-spin h-5 w-5 mr-3" />
                   Optimizing...
                 </span>
               ) : (
@@ -1012,7 +1029,7 @@ const Dashboard = () => {
               {/* Errors Summary (if any) */}
               {optimizationResult.errors && optimizationResult.errors.length > 0 && (
                 <div className="mt-4 bg-red-500/10 border border-red-500/30 rounded-lg p-4">
-                  <div className="text-red-400 font-semibold mb-2">⚠️ Some issues occurred:</div>
+                  <div className="text-red-400 font-semibold mb-2 flex items-center gap-2"><AlertTriangle className="w-4 h-4" /> Some issues occurred:</div>
                   {optimizationResult.errors.map((error, index) => (
                     <div key={index} className="text-red-300 text-sm ml-4">• {error}</div>
                   ))}
@@ -1166,17 +1183,12 @@ const Dashboard = () => {
               >
                 {isRefreshingProcesses ? (
                   <>
-                    <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
+                    <Loader2 className="animate-spin h-4 w-4" />
                     Refreshing...
                   </>
                 ) : (
                   <>
-                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
+                    <RefreshCw className="h-4 w-4" />
                     Refresh
                   </>
                 )}
@@ -1188,7 +1200,7 @@ const Dashboard = () => {
           <div className="mb-4">
             <input
               type="text"
-              placeholder="🔍 Search processes (e.g., VS Code, Chrome, electron)..."
+              placeholder="Search processes (e.g., VS Code, Chrome, electron)..."
               value={processSearchTerm}
               onChange={(e) => setProcessSearchTerm(e.target.value)}
               className="w-full px-4 py-2 bg-[#001D3D] border border-[#48CAE4]/30 text-white placeholder-gray-400 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#48CAE4] transition-all duration-150"
@@ -1269,10 +1281,7 @@ const Dashboard = () => {
           ) : (
             <div className="text-center py-12">
               <div className="inline-flex items-center gap-3 text-[#48CAE4]">
-                <svg className="animate-spin h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
+                <Loader2 className="animate-spin h-6 w-6" />
                 <span className="text-lg">Fetching processes...</span>
               </div>
               <p className="text-gray-400 mt-2 text-sm">This should only take a moment</p>
@@ -1327,7 +1336,7 @@ const Dashboard = () => {
                 <p className="text-gray-400 text-sm mt-1">
                   {installedApps.length > 0 
                     ? `${installedApps.length} applications found` 
-                    : 'Click Refresh to scan your installed applications'}
+                    : 'Loading your installed applications...'}
                 </p>
               </div>
               <button
@@ -1337,14 +1346,14 @@ const Dashboard = () => {
               >
                 {isLoadingApps ? (
                   <>
-                    <svg className="animate-spin h-4 w-4 mr-2" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
+                    <Loader2 className="animate-spin h-4 w-4 mr-2" />
                     Scanning...
                   </>
                 ) : (
-                  '🔄 Refresh'
+                  <>
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    Refresh
+                  </>
                 )}
               </button>
             </div>
@@ -1446,16 +1455,19 @@ const Dashboard = () => {
                 >
                   {isLoadingStorage ? (
                     <>
-                      <svg className="animate-spin h-4 w-4 mr-2" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
+                      <Loader2 className="animate-spin h-4 w-4 mr-2" />
                       Scanning...
                     </>
                   ) : storageAnalysis ? (
-                    '� Scan Again'
+                    <>
+                      <Search className="h-4 w-4 mr-2" />
+                      Scan Again
+                    </>
                   ) : (
-                    '🔍 Start Scan'
+                    <>
+                      <Search className="h-4 w-4 mr-2" />
+                      Start Scan
+                    </>
                   )}
                 </button>
               </div>
@@ -1483,24 +1495,24 @@ const Dashboard = () => {
                             <div className="flex space-x-1">
                               <button
                                 onClick={() => handleOpenFolder(folder.path)}
-                                className="bg-[#0077B6] hover:bg-[#0096E0] text-white px-2 py-1 rounded text-xs transition-all duration-300 transform hover:scale-110"
+                                className="bg-[#0077B6] hover:bg-[#0096E0] text-white px-2 py-1 rounded text-xs transition-all duration-300 transform hover:scale-110 flex items-center gap-1"
                                 title="Open folder"
                               >
-                                📂 Open
+                                <FolderOpen className="w-3 h-3" /> Open
                               </button>
                               <button
                                 onClick={() => handleShowInFolder(folder.path)}
-                                className="bg-[#8B4513] hover:bg-[#A0522D] text-white px-2 py-1 rounded text-xs transition-all duration-300 transform hover:scale-110"
+                                className="bg-[#8B4513] hover:bg-[#A0522D] text-white px-2 py-1 rounded text-xs transition-all duration-300 transform hover:scale-110 flex items-center justify-center"
                                 title="Show in Explorer"
                               >
-                                📁
+                                <Folder className="w-3 h-3" />
                               </button>
                               <button
                                 onClick={() => handleDeleteFolder(folder.path, folder.path.split('\\').pop())}
-                                className="bg-red-600 hover:bg-red-700 text-white px-2 py-1 rounded text-xs transition-all duration-300 transform hover:scale-110"
+                                className="bg-red-600 hover:bg-red-700 text-white px-2 py-1 rounded text-xs transition-all duration-300 transform hover:scale-110 flex items-center justify-center"
                                 title="Delete folder"
                               >
-                                🗑️
+                                <Trash2 className="w-3 h-3" />
                               </button>
                             </div>
                           </div>
@@ -1522,9 +1534,9 @@ const Dashboard = () => {
                           console.log('Toggle showAllFiles. Current:', showAllFiles, 'Total files:', storageAnalysis.largeFiles.length);
                           setShowAllFiles(!showAllFiles);
                         }}
-                        className="bg-[#0077B6] hover:bg-[#0096E0] text-white px-3 py-1 rounded text-sm transition-all duration-300 transform hover:scale-105"
+                        className="bg-[#0077B6] hover:bg-[#0096E0] text-white px-3 py-1 rounded text-sm transition-all duration-300 transform hover:scale-105 flex items-center gap-1"
                       >
-                        {showAllFiles ? '📋 Show Top 20' : '📊 Show All Files'}
+                        {showAllFiles ? <><List className="w-4 h-4" /> Show Top 20</> : <><LayoutGrid className="w-4 h-4" /> Show All Files</>}
                       </button>
                     </div>
                     <div className="text-gray-400 text-xs mb-2">
@@ -1557,24 +1569,24 @@ const Dashboard = () => {
                                 <div className="flex space-x-1 justify-center">
                                   <button
                                     onClick={() => handleOpenFile(file.path)}
-                                    className="bg-[#0077B6] hover:bg-[#0096E0] text-white px-2 py-1 rounded text-xs transition-all duration-300 transform hover:scale-110"
+                                    className="bg-[#0077B6] hover:bg-[#0096E0] text-white px-2 py-1 rounded text-xs transition-all duration-300 transform hover:scale-110 flex items-center gap-1"
                                     title="Open file"
                                   >
-                                    Open
+                                    <ExternalLink className="w-3 h-3" /> Open
                                   </button>
                                   <button
                                     onClick={() => handleShowInFolder(file.path)}
-                                    className="bg-[#8B4513] hover:bg-[#A0522D] text-white px-2 py-1 rounded text-xs transition-all duration-300 transform hover:scale-110"
+                                    className="bg-[#8B4513] hover:bg-[#A0522D] text-white px-2 py-1 rounded text-xs transition-all duration-300 transform hover:scale-110 flex items-center justify-center"
                                     title="Show in folder"
                                   >
-                                    📁
+                                    <Folder className="w-3 h-3" />
                                   </button>
                                   <button
                                     onClick={() => handleDeleteFile(file.path, file.name)}
-                                    className="bg-red-600 hover:bg-red-700 text-white px-2 py-1 rounded text-xs transition-all duration-300 transform hover:scale-110"
+                                    className="bg-red-600 hover:bg-red-700 text-white px-2 py-1 rounded text-xs transition-all duration-300 transform hover:scale-110 flex items-center justify-center"
                                     title="Delete file"
                                   >
-                                    🗑️
+                                    <Trash2 className="w-3 h-3" />
                                   </button>
                                 </div>
                               </td>
@@ -1594,7 +1606,8 @@ const Dashboard = () => {
               </div>
             ) : (
               <div className="text-center text-gray-400 py-8">
-                Click &quot;Scan&quot; to analyze your storage and find large files
+                <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#FFD60A] mb-4"></div>
+                <div>Loading storage analysis...</div>
               </div>
             )}
           </div>

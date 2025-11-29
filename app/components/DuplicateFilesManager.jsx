@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { Copy, Search, Trash2, Eye, FolderOpen, RefreshCw, AlertTriangle, HardDrive, FileText, Image, Film, Music, Archive, Package } from 'lucide-react';
+import { Copy, Search, Trash2, Eye, FolderOpen, RefreshCw, AlertTriangle, HardDrive, FileText, Image, Film, Music, Archive, Package, Clock, Lightbulb } from 'lucide-react';
 
 /**
  * DuplicateFilesManager - UI component for finding and managing duplicate files
@@ -319,8 +319,8 @@ export default function DuplicateFilesManager() {
             </div>
           )}
           <div className="mt-4 text-xs text-gray-400">
-            <p>⏳ This may take a few minutes depending on the number of files...</p>
-            <p className="mt-1">💡 The app will remain responsive during the scan.</p>
+            <p className="flex items-center gap-1"><Clock className="w-3 h-3" /> This may take a few minutes depending on the number of files...</p>
+            <p className="mt-1 flex items-center gap-1"><Lightbulb className="w-3 h-3" /> The app will remain responsive during the scan.</p>
           </div>
         </div>
       )}

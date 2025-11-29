@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Key, ArrowLeft, Lightbulb } from 'lucide-react';
 
 function PasswordReset({ onBack, onResetSuccess }) {
   const [step, setStep] = useState(1); // 1: email, 2: code & new password
@@ -70,7 +71,7 @@ function PasswordReset({ onBack, onResetSuccess }) {
         {/* Logo/Header */}
         <div className="text-center mb-8">
           <div className="w-16 h-16 bg-ocean-warning/20 rounded-xl flex items-center justify-center mx-auto mb-4">
-            <span className="text-2xl">🔑</span>
+            <Key className="w-8 h-8 text-ocean-warning" />
           </div>
           <h1 className="text-3xl font-bold text-white mb-2">Reset Password</h1>
           <p className="text-ocean-surface">
@@ -200,10 +201,11 @@ function PasswordReset({ onBack, onResetSuccess }) {
                   setConfirmPassword('');
                   setError('');
                 }}
-                className="w-full text-sm text-gray-400 hover:text-ocean-surface transition-colors"
+                className="w-full text-sm text-gray-400 hover:text-ocean-surface transition-colors flex items-center justify-center"
                 disabled={loading}
               >
-                ← Use different email
+                <ArrowLeft className="w-4 h-4 mr-1" />
+                Use different email
               </button>
             </form>
           )}
@@ -211,18 +213,20 @@ function PasswordReset({ onBack, onResetSuccess }) {
           <div className="mt-6 text-center">
             <button
               onClick={onBack}
-              className="text-sm text-gray-400 hover:text-ocean-surface transition-colors"
+              className="text-sm text-gray-400 hover:text-ocean-surface transition-colors flex items-center justify-center mx-auto"
               disabled={loading}
             >
-              ← Back to login
+              <ArrowLeft className="w-4 h-4 mr-1" />
+              Back to login
             </button>
           </div>
         </div>
 
         {step === 2 && (
           <div className="mt-6 p-4 bg-ocean-container/50 rounded-lg">
-            <p className="text-xs text-gray-400 text-center">
-              💡 <strong>Development Mode:</strong> Check the browser console for the reset code
+            <p className="text-xs text-gray-400 text-center flex items-center justify-center">
+              <Lightbulb className="w-4 h-4 mr-1" />
+              <strong>Development Mode:</strong>&nbsp;Check the browser console for the reset code
             </p>
           </div>
         )}
