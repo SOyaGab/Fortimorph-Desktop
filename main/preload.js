@@ -298,6 +298,7 @@ contextBridge.exposeInMainWorld('electron', {
       // Dialog channels
       'dialog:openDirectory',
       'dialog:openFileOrFolder',
+      'dialog:openFolderForBackup',
       // Shell channels
       'shell:showItemInFolder',
       // System channels
@@ -321,8 +322,10 @@ contextBridge.exposeInMainWorld('electron', {
     }
     throw new Error(`Invalid IPC channel: ${channel}`);
   },
-  // Helper method for file/folder selection
-  selectFileOrFolder: () => ipcRenderer.invoke('dialog:openFileOrFolder')
+  // Helper method for file selection (multiple files)
+  selectFileOrFolder: () => ipcRenderer.invoke('dialog:openFileOrFolder'),
+  // Helper method for folder selection (for backup)
+  selectFolderForBackup: () => ipcRenderer.invoke('dialog:openFolderForBackup')
 });
 
 // Log that preload has loaded

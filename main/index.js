@@ -243,6 +243,12 @@ app.on('window-all-closed', () => {
   // This allows continuous data collection
   console.log('[App] Window closed - background monitor continues running');
   
+  // IMPORTANT: Force save database to prevent data loss
+  if (db && typeof db.saveDatabaseImmediate === 'function') {
+    db.saveDatabaseImmediate();
+    console.log('[App] Database saved on window close');
+  }
+  
   // Cleanup services
   if (quarantineService) {
     quarantineService.cleanup();
@@ -686,6 +692,8 @@ ipcMain.handle('system:stop-process-stream', async () => {
     console.log('[Process Stream] Stopping real-time process updates...');
     
     isStreamActive = false;
+    isTabVisible = false;
+    consecutiveNoChangeCount = 0;
     
     if (processStreamInterval) {
       clearInterval(processStreamInterval);
@@ -696,6 +704,12 @@ ipcMain.handle('system:stop-process-stream', async () => {
     return { success: true, message: 'Process stream stopped' };
   } catch (error) {
     console.error('[Process Stream] Error stopping stream:', error);
+    // Still clean up even on error
+    isStreamActive = false;
+    if (processStreamInterval) {
+      clearInterval(processStreamInterval);
+      processStreamInterval = null;
+    }
     return { success: false, error: error.message };
   }
 });
@@ -2490,14 +2504,31 @@ ipcMain.handle('dialog:openDirectory', async () => {
 });
 
 // Show open file/folder dialog (supports both files and folders)
+// Note: On Windows, we can't mix openFile and openDirectory in a single dialog
+// So we show a file dialog that allows multiple file selection
 ipcMain.handle('dialog:openFileOrFolder', async () => {
   try {
     const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openFile', 'openDirectory', 'multiSelections']
+      properties: ['openFile', 'multiSelections'],
+      title: 'Select Files to Backup'
     });
     return result;
   } catch (error) {
     console.error('Error showing file/folder dialog:', error);
+    return { canceled: true, error: error.message };
+  }
+});
+
+// Show open folder dialog for selecting folders (separate from file selection)
+ipcMain.handle('dialog:openFolderForBackup', async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory', 'multiSelections'],
+      title: 'Select Folders to Backup'
+    });
+    return result;
+  } catch (error) {
+    console.error('Error showing folder dialog:', error);
     return { canceled: true, error: error.message };
   }
 });

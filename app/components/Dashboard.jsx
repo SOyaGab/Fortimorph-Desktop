@@ -1212,7 +1212,15 @@ const Dashboard = () => {
             )}
           </div>
           
-          {processes.length > 0 ? (
+          {isProcessesInitialLoading ? (
+            <div className="text-center py-12">
+              <div className="inline-flex items-center gap-3 text-[#48CAE4]">
+                <Loader2 className="animate-spin h-6 w-6" />
+                <span className="text-lg">Loading processes...</span>
+              </div>
+              <p className="text-gray-400 mt-2 text-sm">Scanning running applications...</p>
+            </div>
+          ) : processes.length > 0 ? (
             <div className="overflow-x-auto">
               <table className="w-full text-white">
                 <thead>

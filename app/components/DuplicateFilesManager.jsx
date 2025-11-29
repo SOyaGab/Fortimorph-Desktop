@@ -219,19 +219,16 @@ export default function DuplicateFilesManager() {
             </label>
             <input
               type="number"
+              min="0"
               value={minFileSize}
               onChange={(e) => {
-                setMinFileSize(Math.max(1, parseInt(e.target.value) || 1));
-                if (scanResults) {
-                  setScanResults(null);
-                }
+                const value = e.target.value;
+                setMinFileSize(value === '' ? 0 : Math.max(0, parseInt(value) || 0));
               }}
               disabled={scanning}
               className="w-full px-4 py-2 bg-[#001D3D] border-2 border-[#0077B6] text-white rounded-lg focus:border-[#FFC300] focus:outline-none disabled:opacity-50"
-              min="1"
-              placeholder="1"
+              placeholder="Enter min size in KB"
             />
-            <p className="text-xs text-gray-400 mt-1">Minimum: 1KB</p>
           </div>
           <div>
             <label className="block text-sm font-medium mb-2 text-white">
@@ -239,19 +236,16 @@ export default function DuplicateFilesManager() {
             </label>
             <input
               type="number"
+              min="1"
               value={maxFileSize}
               onChange={(e) => {
-                setMaxFileSize(Math.max(1, parseInt(e.target.value) || 1));
-                if (scanResults) {
-                  setScanResults(null);
-                }
+                const value = e.target.value;
+                setMaxFileSize(value === '' ? 1 : Math.max(1, parseInt(value) || 1));
               }}
               disabled={scanning}
               className="w-full px-4 py-2 bg-[#001D3D] border-2 border-[#0077B6] text-white rounded-lg focus:border-[#FFC300] focus:outline-none disabled:opacity-50"
-              min="1"
-              placeholder="500"
+              placeholder="Enter max size in MB"
             />
-            <p className="text-xs text-gray-400 mt-1">Maximum: 500MB</p>
           </div>
           <div>
             <label className="block text-sm font-medium mb-2 text-white">

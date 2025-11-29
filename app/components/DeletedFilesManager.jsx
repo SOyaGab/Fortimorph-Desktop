@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Trash2, RefreshCw, RotateCcw, XCircle, Search, Filter, Calendar, FileText, Image, Film, Music, Archive, Package, Folder, AlertCircle } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Trash2, RefreshCw, RotateCcw, XCircle, Search, Filter, Calendar, FileText, Image, Film, Music, Archive, Package, Folder, AlertCircle, Eye } from 'lucide-react';
 
 /**
  * DeletedFilesManager - UI component for viewing and restoring deleted files
@@ -23,6 +23,8 @@ export default function DeletedFilesManager() {
   const [selectedFiles, setSelectedFiles] = useState(new Set());
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(20); // Show 20 items per page
+  const [restoringFiles, setRestoringFiles] = useState(new Set()); // Track files being restored
+  const restoredRecycleBinPaths = useRef(new Set()); // Track restored Recycle Bin files to hide them
 
   useEffect(() => {
     loadDeletedFiles();
@@ -40,7 +42,14 @@ export default function DeletedFilesManager() {
     setLoading(true);
     try {
       const result = await window.deletedFilesAPI.list(filters);
-      setDeletedFiles(result || []);
+      // Filter out Recycle Bin files that were already restored in this session
+      const filteredResult = (result || []).filter(file => {
+        if (file.source === 'recycle-bin' && file.recycleBinPath) {
+          return !restoredRecycleBinPaths.current.has(file.recycleBinPath);
+        }
+        return true;
+      });
+      setDeletedFiles(filteredResult);
     } catch (error) {
       console.error('Failed to load deleted files:', error);
       alert('Failed to load deleted files: ' + error.message);
@@ -55,6 +64,21 @@ export default function DeletedFilesManager() {
       setStatistics(stats);
     } catch (error) {
       console.error('Failed to load statistics:', error);
+    }
+  }, []);
+
+  // Open file directly (for viewing deleted files before restore)
+  const handleOpenFile = useCallback(async (file) => {
+    const filePath = file.recycleBinPath || file.trash_path;
+    if (!filePath) {
+      alert('Cannot open this file - path not available');
+      return;
+    }
+    try {
+      await window.electronAPI.system.openFile(filePath);
+    } catch (error) {
+      console.error('Failed to open file:', error);
+      alert('Failed to open file: ' + error.message);
     }
   }, []);
 
@@ -88,16 +112,16 @@ export default function DeletedFilesManager() {
   const handleRestore = useCallback(async (file) => {
     const fileName = file.file_name || file.fileName;
     const isRecycleBin = file.source === 'recycle-bin';
+    const fileId = file.id || `recycle-${file.recycleBinPath}`;
     
     const confirmed = window.confirm(
-      `Restore "${fileName}"?\n\n${
-        isRecycleBin 
-          ? 'This file will be copied from Windows Recycle Bin to its original location.' 
-          : 'The file will be restored to its original location or renamed if a file already exists there.'
-      }`
+      `Restore "${fileName}"?\n\nThe file will be restored to its original location.\nIf a file already exists there, it will be renamed automatically.`
     );
 
     if (!confirmed) return;
+
+    // Mark file as being restored (for UI feedback)
+    setRestoringFiles(prev => new Set([...prev, fileId]));
 
     try {
       let result;
@@ -113,15 +137,37 @@ export default function DeletedFilesManager() {
       }
       
       if (result.success) {
-        alert(`File restored successfully!\n\nRestored to: ${result.restoredPath}`);
-        loadDeletedFiles();
+        // Track restored Recycle Bin files to prevent them from reappearing
+        if (isRecycleBin && file.recycleBinPath) {
+          restoredRecycleBinPaths.current.add(file.recycleBinPath);
+        }
+        
+        // Optimistic UI update - immediately remove the file from the list
+        setDeletedFiles(prev => prev.filter(f => {
+          const fId = f.id || `recycle-${f.recycleBinPath}`;
+          return fId !== fileId;
+        }));
+        
+        // Show success message
+        alert(`✅ File restored successfully!\n\nRestored to: ${result.restoredPath}`);
+        
+        // Refresh statistics (but not the file list to avoid re-adding the file)
         loadStatistics();
+      } else {
+        alert(`Failed to restore file: ${result.error || 'Unknown error'}`);
       }
     } catch (error) {
       console.error('Failed to restore file:', error);
       alert('Failed to restore file: ' + error.message);
+    } finally {
+      // Remove from restoring state
+      setRestoringFiles(prev => {
+        const next = new Set(prev);
+        next.delete(fileId);
+        return next;
+      });
     }
-  }, [loadDeletedFiles, loadStatistics]);
+  }, [loadStatistics]);
 
   const handlePermanentDelete = useCallback(async (file) => {
     const fileName = file.file_name || file.fileName;
@@ -185,22 +231,35 @@ export default function DeletedFilesManager() {
 
     let restored = 0;
     let failed = 0;
+    const restoredIds = [];
 
-    for (const fileId of selectedFiles) {
+    // Get the actual file objects for selected IDs
+    const filesToRestore = deletedFiles.filter(f => selectedFiles.has(f.id));
+
+    for (const file of filesToRestore) {
       try {
-        await window.deletedFilesAPI.restore(fileId);
-        restored++;
+        const result = await window.deletedFilesAPI.restore(file.id);
+        if (result.success) {
+          restored++;
+          restoredIds.push(file.id);
+        } else {
+          failed++;
+        }
       } catch (error) {
         failed++;
-        console.error(`Failed to restore file ${fileId}:`, error);
+        console.error(`Failed to restore file ${file.id}:`, error);
       }
     }
 
-    alert(`Restoration complete!\n\nRestored: ${restored}\nFailed: ${failed}`);
+    // Optimistic UI update - remove restored files from list
+    if (restoredIds.length > 0) {
+      setDeletedFiles(prev => prev.filter(f => !restoredIds.includes(f.id)));
+    }
+
+    alert(`Restoration complete!\n\n✅ Restored: ${restored}\n❌ Failed: ${failed}`);
     setSelectedFiles(new Set());
-    loadDeletedFiles();
     loadStatistics();
-  }, [selectedFiles, loadDeletedFiles, loadStatistics]);
+  }, [selectedFiles, deletedFiles, loadStatistics]);
 
   const toggleFileSelection = useCallback((fileId) => {
     setSelectedFiles(prev => {
@@ -483,19 +542,41 @@ export default function DeletedFilesManager() {
                 </div>
 
                 <div className="flex gap-2">
+                  {/* Open button to view file */}
+                  <button
+                    onClick={() => handleOpenFile(file)}
+                    className="px-3 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg transition flex items-center gap-2 text-sm"
+                    title="Open file"
+                  >
+                    <Eye className="w-4 h-4" />
+                  </button>
                   <button
                     onClick={() => handleRestore(file)}
-                    className="px-4 py-2 bg-green-600 hover:bg-green-500 rounded-lg transition flex items-center gap-2 text-sm"
+                    disabled={restoringFiles.has(fileId)}
+                    className={`px-4 py-2 rounded-lg transition flex items-center gap-2 text-sm ${
+                      restoringFiles.has(fileId) 
+                        ? 'bg-green-800 cursor-not-allowed opacity-70' 
+                        : 'bg-green-600 hover:bg-green-500'
+                    }`}
                     title="Restore file"
                   >
-                    <RotateCcw className="w-4 h-4" />
-                    Restore
+                    {restoringFiles.has(fileId) ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        Restoring...
+                      </>
+                    ) : (
+                      <>
+                        <RotateCcw className="w-4 h-4" />
+                        Restore
+                      </>
+                    )}
                   </button>
                   <button
                     onClick={() => handlePermanentDelete(file)}
-                    className="px-4 py-2 bg-red-600 hover:bg-red-500 rounded-lg transition flex items-center gap-2 text-sm"
-                    title="Permanently delete"
-                    disabled={isRecycleBin}
+                    className="px-4 py-2 bg-red-600 hover:bg-red-500 rounded-lg transition flex items-center gap-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={isRecycleBin ? "Can only delete via Windows" : "Permanently delete"}
+                    disabled={isRecycleBin || restoringFiles.has(fileId)}
                   >
                     <XCircle className="w-4 h-4" />
                     Delete

@@ -183,49 +183,80 @@ class BackupService {
   }
 
   /**
-   * Get all files recursively from a directory
+   * Get all files recursively from a directory or return file info for a single file
    */
-  async getAllFiles(dirPath, arrayOfFiles = []) {
+  async getAllFiles(inputPath, arrayOfFiles = []) {
     try {
-      const files = await readdir(dirPath);
+      const stats = await stat(inputPath);
+      
+      // If it's a single file, add it directly
+      if (stats.isFile()) {
+        arrayOfFiles.push({
+          path: inputPath,
+          size: stats.size,
+          modified: stats.mtime.getTime()
+        });
+        return arrayOfFiles;
+      }
+      
+      // If it's a directory, scan recursively
+      if (stats.isDirectory()) {
+        const files = await readdir(inputPath);
 
-      for (const file of files) {
-        const filePath = path.join(dirPath, file);
-        
-        try {
-          const stats = await stat(filePath);
+        for (const file of files) {
+          const filePath = path.join(inputPath, file);
           
-          if (stats.isDirectory()) {
-            arrayOfFiles = await this.getAllFiles(filePath, arrayOfFiles);
-          } else {
-            arrayOfFiles.push({
-              path: filePath,
-              size: stats.size,
-              modified: stats.mtime.getTime()
-            });
+          try {
+            const fileStats = await stat(filePath);
+            
+            if (fileStats.isDirectory()) {
+              arrayOfFiles = await this.getAllFiles(filePath, arrayOfFiles);
+            } else {
+              arrayOfFiles.push({
+                path: filePath,
+                size: fileStats.size,
+                modified: fileStats.mtime.getTime()
+              });
+            }
+          } catch (error) {
+            console.warn(`Skipping file ${filePath}: ${error.message}`);
           }
-        } catch (error) {
-          console.warn(`Skipping file ${filePath}: ${error.message}`);
         }
       }
 
       return arrayOfFiles;
     } catch (error) {
-      console.error(`Error reading directory ${dirPath}:`, error);
+      console.error(`Error reading path ${inputPath}:`, error);
       return arrayOfFiles;
     }
   }
 
   /**
    * Detect files that need backup (new or changed)
+   * @param {string} sourcePath - Source path (file or directory)
+   * @param {Object} previousManifest - Previous backup manifest for incremental check
    */
   async detectIncrementalChanges(sourcePath, previousManifest = null) {
     const currentFiles = await this.getAllFiles(sourcePath);
     const filesToBackup = [];
     const unchangedFiles = [];
+    
+    // Check if source is a single file
+    const sourceStats = await stat(sourcePath);
+    const isFile = sourceStats.isFile();
 
     for (const file of currentFiles) {
-      const relativePath = path.relative(sourcePath, file.path);
+      // For single files, use just the filename; for directories, use relative path
+      let relativePath;
+      if (isFile) {
+        relativePath = path.basename(file.path);
+      } else {
+        relativePath = path.relative(sourcePath, file.path);
+        // Handle case where file.path equals sourcePath
+        if (!relativePath || relativePath === '.') {
+          relativePath = path.basename(file.path);
+        }
+      }
       
       // If no previous manifest, backup everything
       if (!previousManifest) {
@@ -358,8 +389,9 @@ class BackupService {
 
   /**
    * Create backup with manifest
+   * Supports multiple source paths separated by semicolons
    */
-  async createBackup(sourcePath, options = {}, progressCallback = null) {
+  async createBackup(sourcePathInput, options = {}, progressCallback = null) {
     const {
       name = `Backup_${Date.now()}`,
       encrypt = true,
@@ -374,35 +406,19 @@ class BackupService {
         await this.initializeEncryptionKey(userId);
       }
       
-      // Preflight checks
-      const preflightResult = await this.preflightChecks(sourcePath);
-      if (preflightResult.errors.length > 0) {
-        throw new Error(`Preflight checks failed: ${preflightResult.errors.join(', ')}`);
-      }
-
-      // Get previous backup manifest if incremental
-      // USER ISOLATION: Only get backups for current user
-      let previousManifest = null;
-      if (incremental) {
-        const previousBackups = this.db.getBackups({ source_path: sourcePath }, 10, userId);
-        if (previousBackups && previousBackups.length > 0) {
-          const lastBackup = previousBackups[previousBackups.length - 1];
-          if (lastBackup.manifest) {
-            previousManifest = JSON.parse(lastBackup.manifest);
-          }
-        }
-      }
-
-      // Detect changes
-      const changes = await this.detectIncrementalChanges(sourcePath, previousManifest);
+      // Parse multiple source paths (separated by semicolons)
+      const sourcePaths = sourcePathInput.split(';').map(p => p.trim()).filter(p => p);
       
-      if (progressCallback) {
-        progressCallback({
-          phase: 'detection',
-          filesFound: changes.totalFiles,
-          filesToBackup: changes.filesToBackup.length,
-          filesUnchanged: changes.unchangedFiles.length
-        });
+      if (sourcePaths.length === 0) {
+        throw new Error('No source paths provided');
+      }
+      
+      // Preflight checks for all paths
+      for (const sourcePath of sourcePaths) {
+        const preflightResult = await this.preflightChecks(sourcePath);
+        if (preflightResult.errors.length > 0) {
+          throw new Error(`Preflight checks failed for ${sourcePath}: ${preflightResult.errors.join(', ')}`);
+        }
       }
 
       // Create backup directory
@@ -410,11 +426,12 @@ class BackupService {
       const backupPath = path.join(this.backupStorePath, backupId);
       await mkdir(backupPath, { recursive: true });
 
-      // Backup files
+      // Backup manifest
       const manifest = {
         backupId,
         name,
-        sourcePath,
+        sourcePath: sourcePathInput, // Store original input for reference
+        sourcePaths, // Store array of paths
         backupPath,
         timestamp: Date.now(),
         encrypted: encrypt,
@@ -425,18 +442,60 @@ class BackupService {
 
       let processedFiles = 0;
       let totalSize = 0;
+      let allFilesToBackup = [];
 
-      for (const file of changes.filesToBackup) {
+      // Collect all files from all source paths
+      for (const sourcePath of sourcePaths) {
+        // Get previous backup manifest if incremental
+        let previousManifest = null;
+        if (incremental) {
+          const previousBackups = this.db.getBackups({ source_path: sourcePathInput }, 10, userId);
+          if (previousBackups && previousBackups.length > 0) {
+            const lastBackup = previousBackups[previousBackups.length - 1];
+            if (lastBackup.manifest) {
+              previousManifest = JSON.parse(lastBackup.manifest);
+            }
+          }
+        }
+
+        // Detect changes for this source path
+        const changes = await this.detectIncrementalChanges(sourcePath, previousManifest);
+        
+        // Add source path info to each file for proper restoration
+        for (const file of changes.filesToBackup) {
+          file.sourceRoot = sourcePath;
+          allFilesToBackup.push(file);
+        }
+      }
+      
+      if (progressCallback) {
+        progressCallback({
+          phase: 'detection',
+          filesFound: allFilesToBackup.length,
+          filesToBackup: allFilesToBackup.length,
+          filesUnchanged: 0
+        });
+      }
+
+      // Backup all files
+      for (const file of allFilesToBackup) {
         try {
           const hash = await this.calculateFileHash(file.path);
-          const targetPath = path.join(backupPath, file.relativePath + '.bak');
+          
+          // Create a unique path within backup to avoid collisions
+          // Use source root base name + relative path
+          const sourceBaseName = path.basename(file.sourceRoot);
+          const uniqueRelPath = path.join(sourceBaseName, file.relativePath);
+          const targetPath = path.join(backupPath, uniqueRelPath + '.bak');
 
           // Encrypt and compress file
           await this.encryptFile(file.path, targetPath, { encrypt, compress });
 
           manifest.files.push({
             relativePath: file.relativePath,
+            uniqueRelPath: uniqueRelPath,
             originalPath: file.path,
+            sourceRoot: file.sourceRoot,
             backupPath: targetPath,
             size: file.size,
             modified: file.modified,
@@ -451,37 +510,36 @@ class BackupService {
             progressCallback({
               phase: 'backup',
               current: processedFiles,
-              total: changes.filesToBackup.length,
+              total: allFilesToBackup.length,
               currentFile: file.relativePath,
-              progress: (processedFiles / changes.filesToBackup.length) * 100
+              progress: (processedFiles / allFilesToBackup.length) * 100
             });
           }
         } catch (error) {
           console.error(`Failed to backup file ${file.path}:`, error);
           manifest.files.push({
             relativePath: file.relativePath,
+            originalPath: file.path,
             error: error.message,
             skipped: true
           });
         }
       }
 
-      // Add unchanged files to manifest (reference only)
-      if (incremental && previousManifest) {
-        manifest.referencedFiles = changes.unchangedFiles.map(f => f.relativePath);
-      }
-
       // Save manifest to file
       const manifestPath = path.join(backupPath, 'manifest.json');
       await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
 
+      // Count non-skipped files
+      const successfulFiles = manifest.files.filter(f => !f.skipped).length;
+
       // Save backup record to database
       this.db.createBackup({
         name,
-        source_path: sourcePath,
+        source_path: sourcePathInput,
         backup_path: backupPath,
         size: totalSize,
-        file_count: manifest.files.length,
+        file_count: successfulFiles,
         encrypted: encrypt ? 1 : 0,
         manifest: JSON.stringify(manifest)
       }, userId);
@@ -492,9 +550,10 @@ class BackupService {
         `Backup created: ${name}`,
         JSON.stringify({
           backupId,
-          filesBackedUp: manifest.files.length,
+          filesBackedUp: successfulFiles,
           totalSize,
-          incremental
+          incremental,
+          sourcePaths: sourcePaths.length
         }),
         'info',
         userId
@@ -505,7 +564,7 @@ class BackupService {
           phase: 'complete',
           success: true,
           backupId,
-          filesBackedUp: manifest.files.length,
+          filesBackedUp: successfulFiles,
           totalSize
         });
       }
@@ -514,7 +573,7 @@ class BackupService {
         success: true,
         backupId,
         manifest,
-        filesBackedUp: manifest.files.length,
+        filesBackedUp: successfulFiles,
         totalSize
       };
 
@@ -525,7 +584,7 @@ class BackupService {
       this.db.addLog(
         'backup',
         `Backup failed: ${error.message}`,
-        JSON.stringify({ sourcePath, error: error.stack }),
+        JSON.stringify({ sourcePathInput, error: error.stack }),
         'error',
         userId
       );
@@ -560,10 +619,17 @@ class BackupService {
 
       const manifest = JSON.parse(backup.manifest);
       
+      // Filter out skipped files for counting
+      const filesToRestore = manifest.files.filter(f => !f.skipped);
+      
+      if (filesToRestore.length === 0) {
+        throw new Error('No files to restore in this backup');
+      }
+      
       if (progressCallback) {
         progressCallback({
           phase: 'init',
-          filesTotal: manifest.files.length
+          filesTotal: filesToRestore.length
         });
       }
 
@@ -575,13 +641,22 @@ class BackupService {
       let restoredFiles = 0;
       const verificationResults = [];
 
-      for (const file of manifest.files) {
-        if (file.skipped) {
-          continue;
-        }
-
+      for (const file of filesToRestore) {
         try {
-          let targetFilePath = path.join(targetPath, file.relativePath);
+          // Check if backup file exists
+          if (!fs.existsSync(file.backupPath)) {
+            console.error(`Backup file not found: ${file.backupPath}`);
+            verificationResults.push({
+              file: file.relativePath,
+              failed: true,
+              error: 'Backup file not found'
+            });
+            continue;
+          }
+          
+          // Use uniqueRelPath if available (new format), otherwise use relativePath
+          const restoreRelPath = file.uniqueRelPath || file.relativePath;
+          let targetFilePath = path.join(targetPath, restoreRelPath);
           
           // Ensure target directory exists
           const targetDir = path.dirname(targetFilePath);
@@ -638,9 +713,9 @@ class BackupService {
             progressCallback({
               phase: 'restore',
               current: restoredFiles,
-              total: manifest.files.length,
+              total: filesToRestore.length,
               currentFile: file.relativePath,
-              progress: (restoredFiles / manifest.files.length) * 100
+              progress: (restoredFiles / filesToRestore.length) * 100
             });
           }
 

@@ -217,11 +217,15 @@ const VerificationCenter = () => {
         throw new Error('Delete API not available');
       }
 
+      // Optimistic UI update - remove token immediately from the list
+      setTokens(prev => prev.filter(t => t.tokenId !== tokenId));
+
       await window.verificationAPI.deleteToken(tokenId);
       setSuccess('Token deleted successfully');
-      await loadTokens();
     } catch (err) {
       setError('Failed to delete token: ' + err.message);
+      // Reload tokens to restore the state if deletion failed
+      await loadTokens();
     }
   };
 

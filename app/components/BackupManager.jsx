@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, memo } from 'react';
-import { FolderOpen, Save, RefreshCw, Trash2, CheckCircle, AlertCircle, Download, HardDrive, Lock, Unlock, QrCode, Copy, Search } from 'lucide-react';
+import { FolderOpen, Save, RefreshCw, Trash2, CheckCircle, AlertCircle, Download, HardDrive, Lock, Unlock, QrCode, Copy, Search, FileText } from 'lucide-react';
 import TokenConfigModal from './TokenConfigModal';
 import BackupRecoveryKeyModal from './BackupRecoveryKeyModal'; // OPTION B: Simplified modal
 import DeletedFilesManager from './DeletedFilesManager';
@@ -159,15 +159,31 @@ export default function BackupManager() {
 
   const handleSelectSourcePath = useCallback(async () => {
     try {
-      // Use new API that supports both files and folders
+      // Select files (individual files)
       const result = await window.electron.selectFileOrFolder();
       if (result && !result.canceled && result.filePaths.length > 0) {
         // Support multiple selections: join paths with semicolon
         const selectedPaths = result.filePaths.join(';');
-        setSourcePath(selectedPaths);
+        // Append to existing selection if any
+        setSourcePath(prev => prev ? `${prev};${selectedPaths}` : selectedPaths);
       }
     } catch (error) {
-      console.error('Failed to select files/folders:', error);
+      console.error('Failed to select files:', error);
+    }
+  }, []);
+
+  const handleSelectFolderPath = useCallback(async () => {
+    try {
+      // Select folders
+      const result = await window.electron.selectFolderForBackup();
+      if (result && !result.canceled && result.filePaths.length > 0) {
+        // Support multiple selections: join paths with semicolon
+        const selectedPaths = result.filePaths.join(';');
+        // Append to existing selection if any
+        setSourcePath(prev => prev ? `${prev};${selectedPaths}` : selectedPaths);
+      }
+    } catch (error) {
+      console.error('Failed to select folders:', error);
     }
   }, []);
 
@@ -560,23 +576,49 @@ export default function BackupManager() {
                 {/* Source Path */}
                 <div>
                   <label className="block text-sm font-medium mb-2 text-white">Select Files or Folders</label>
-                  <p className="text-xs text-gray-400 mb-2">You can select folders, individual files, or multiple items</p>
+                  <p className="text-xs text-gray-400 mb-2">Select individual files or entire folders to backup. You can add multiple items.</p>
                   <div className="flex gap-2">
                     <input
                       type="text"
                       value={sourcePath}
                       readOnly
-                      placeholder="Select files or folders to backup"
-                      className="flex-1 px-4 py-2 bg-[#001D3D] border-2 border-[#0077B6] text-white rounded-lg cursor-not-allowed"
+                      placeholder="Click buttons to select files or folders..."
+                      className="flex-1 px-4 py-2 bg-[#001D3D] border-2 border-[#0077B6] text-white rounded-lg cursor-not-allowed text-sm"
                     />
                     <button
                       onClick={handleSelectSourcePath}
-                      className="px-4 py-2 bg-[#003566] hover:bg-[#0077B6] text-white rounded-lg transition flex items-center gap-2"
+                      className="px-3 py-2 bg-[#0077B6] hover:bg-[#00B4D8] text-white rounded-lg transition flex items-center gap-2 text-sm"
+                      title="Select individual files"
+                    >
+                      <FileText className="w-4 h-4" />
+                      Files
+                    </button>
+                    <button
+                      onClick={handleSelectFolderPath}
+                      className="px-3 py-2 bg-[#003566] hover:bg-[#0077B6] text-white rounded-lg transition flex items-center gap-2 text-sm"
+                      title="Select folders"
                     >
                       <FolderOpen className="w-4 h-4" />
-                      Browse
+                      Folders
                     </button>
+                    {sourcePath && (
+                      <button
+                        onClick={() => setSourcePath('')}
+                        className="px-3 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg transition flex items-center gap-1 text-sm"
+                        title="Clear selection"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
+                  {sourcePath && (
+                    <div className="mt-2 p-2 bg-gray-700 rounded text-xs text-gray-300 max-h-20 overflow-y-auto">
+                      <p className="font-medium text-white mb-1">Selected items ({sourcePath.split(';').length}):</p>
+                      {sourcePath.split(';').map((p, i) => (
+                        <div key={i} className="truncate">• {p}</div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 {/* Options */}
