@@ -13,6 +13,29 @@
   * {
     @apply transition-colors duration-150;
   }
+
+  /* Ensure text inputs are fully interactive */
+  input[type="text"],
+  input[type="number"],
+  input[type="email"],
+  input[type="password"],
+  textarea {
+    -webkit-user-select: text !important;
+    user-select: text !important;
+    cursor: text !important;
+  }
+
+  /* Hide number input spinners/arrows */
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
 }
 
 @layer components {

@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react';
-import { Copy, Search, Trash2, Eye, FolderOpen, RefreshCw, AlertTriangle, HardDrive, FileText, Image, Film, Music, Archive, Package, Clock, Lightbulb } from 'lucide-react';
+import { useState, useCallback, useRef } from 'react';
+import { Copy, Search, Trash2, Eye, FolderOpen, RefreshCw, AlertTriangle, HardDrive, FileText, Image, Film, Music, Archive, Package, Clock, Lightbulb, CheckCircle } from 'lucide-react';
 
 /**
  * DuplicateFilesManager - UI component for finding and managing duplicate files
@@ -16,16 +16,25 @@ export default function DuplicateFilesManager() {
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(null);
   const [filterType, setFilterType] = useState('all');
-  const [minFileSize, setMinFileSize] = useState(1); // Default 1KB - scan files from 1KB to 500MB+
-  const [maxFileSize, setMaxFileSize] = useState(500); // Default 500MB max
+  const [minFileSizeInput, setMinFileSizeInput] = useState('1'); // String for free text input
+  const [maxFileSizeInput, setMaxFileSizeInput] = useState('500'); // String for free text input
   const [expandedGroups, setExpandedGroups] = useState(new Set());
   const [selectedToKeep, setSelectedToKeep] = useState({});
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(10); // Show 10 groups per page
+  const [scanMessage, setScanMessage] = useState(null); // For non-blocking notifications
+  
+  // Refs to maintain input focus
+  const minInputRef = useRef(null);
+  const maxInputRef = useRef(null);
 
   // Don't auto-scan - let user click to scan
 
   const handleStartScan = useCallback(async () => {
+    // Parse the input values when scanning
+    const minFileSize = parseInt(minFileSizeInput, 10) || 0;
+    const maxFileSize = parseInt(maxFileSizeInput, 10) || 500;
+    
     // Auto-select common directories
     const userHome = await window.electron.invoke('system:getUserHome');
     const commonDirs = [
@@ -38,6 +47,7 @@ export default function DuplicateFilesManager() {
     ].filter(dir => dir); // Filter out any undefined paths
 
     setScanning(true);
+    setScanMessage(null);
     setProgress({ phase: 'init', message: 'Preparing scan...', progress: 0 });
     setCurrentPage(1);
 
@@ -57,24 +67,28 @@ export default function DuplicateFilesManager() {
         console.log('Scan complete:', result.stats);
         
         if (result.duplicateGroups && result.duplicateGroups.length > 0) {
-          alert(
-            `Scan Complete!\n\n` +
-            `Found ${result.stats.duplicateGroups} groups of duplicates\n` +
-            `Total duplicate files: ${result.stats.totalDuplicates}\n` +
-            `Potential space savings: ${formatBytes(result.stats.totalWastedSpace)}`
-          );
+          setScanMessage({
+            type: 'success',
+            text: `Found ${result.stats.duplicateGroups} groups of duplicates (${result.stats.totalDuplicates} files). Potential savings: ${formatBytes(result.stats.totalWastedSpace)}`
+          });
         } else {
-          alert('Scan Complete!\n\nNo duplicate files found in the scanned directories.');
+          setScanMessage({
+            type: 'info',
+            text: 'No duplicate files found in the scanned directories.'
+          });
         }
       }
     } catch (error) {
       console.error('Scan failed:', error);
-      alert('Scan failed: ' + error.message);
+      setScanMessage({
+        type: 'error',
+        text: 'Scan failed: ' + error.message
+      });
     } finally {
       setScanning(false);
       setProgress(null);
     }
-  }, [minFileSize, maxFileSize, filterType]);
+  }, [minFileSizeInput, maxFileSizeInput, filterType]);
 
   const handleDeleteDuplicates = useCallback(async (group, groupIndex) => {
     const filesToKeep = selectedToKeep[groupIndex] || [group.files[0].path];
@@ -214,38 +228,48 @@ export default function DuplicateFilesManager() {
       <div className="bg-gray-800 p-4 rounded-lg">
         <div className="grid grid-cols-4 gap-4">
           <div>
-            <label className="block text-sm font-medium mb-2 text-white">
+            <label htmlFor="minSizeInput" className="block text-sm font-medium mb-2 text-white">
               Min Size (KB)
             </label>
             <input
-              type="number"
-              min="0"
-              value={minFileSize}
-              onChange={(e) => {
-                const value = e.target.value;
-                setMinFileSize(value === '' ? 0 : Math.max(0, parseInt(value) || 0));
-              }}
+              ref={minInputRef}
+              id="minSizeInput"
+              name="minSize"
+              type="text"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              value={minFileSizeInput}
+              onChange={(e) => setMinFileSizeInput(e.target.value)}
+              onFocus={(e) => e.target.select()}
               disabled={scanning}
               className="w-full px-4 py-2 bg-[#001D3D] border-2 border-[#0077B6] text-white rounded-lg focus:border-[#FFC300] focus:outline-none disabled:opacity-50"
-              placeholder="Enter min size in KB"
+              placeholder="e.g., 100"
             />
+            <p className="text-xs text-gray-500 mt-1">Type any size in KB</p>
           </div>
           <div>
-            <label className="block text-sm font-medium mb-2 text-white">
+            <label htmlFor="maxSizeInput" className="block text-sm font-medium mb-2 text-white">
               Max Size (MB)
             </label>
             <input
-              type="number"
-              min="1"
-              value={maxFileSize}
-              onChange={(e) => {
-                const value = e.target.value;
-                setMaxFileSize(value === '' ? 1 : Math.max(1, parseInt(value) || 1));
-              }}
+              ref={maxInputRef}
+              id="maxSizeInput"
+              name="maxSize"
+              type="text"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              value={maxFileSizeInput}
+              onChange={(e) => setMaxFileSizeInput(e.target.value)}
+              onFocus={(e) => e.target.select()}
               disabled={scanning}
               className="w-full px-4 py-2 bg-[#001D3D] border-2 border-[#0077B6] text-white rounded-lg focus:border-[#FFC300] focus:outline-none disabled:opacity-50"
-              placeholder="Enter max size in MB"
+              placeholder="e.g., 500"
             />
+            <p className="text-xs text-gray-500 mt-1">Type any size in MB</p>
           </div>
           <div>
             <label className="block text-sm font-medium mb-2 text-white">
@@ -269,7 +293,8 @@ export default function DuplicateFilesManager() {
               <option value="application">Applications</option>
             </select>
           </div>
-          <div className="flex items-end">
+          <div>
+            <label className="block text-sm font-medium mb-2 text-white">&nbsp;</label>
             <button
               onClick={handleStartScan}
               disabled={scanning}
@@ -280,6 +305,24 @@ export default function DuplicateFilesManager() {
             </button>
           </div>
         </div>
+        
+        {/* Scan Result Message */}
+        {scanMessage && (
+          <div className={`mt-3 p-3 rounded-lg flex items-center gap-2 ${
+            scanMessage.type === 'success' ? 'bg-green-900/50 border border-green-500 text-green-200' :
+            scanMessage.type === 'error' ? 'bg-red-900/50 border border-red-500 text-red-200' :
+            'bg-blue-900/50 border border-blue-500 text-blue-200'
+          }`}>
+            <CheckCircle className="w-5 h-5 flex-shrink-0" />
+            <span className="text-sm">{scanMessage.text}</span>
+            <button 
+              onClick={() => setScanMessage(null)}
+              className="ml-auto text-gray-400 hover:text-white"
+            >
+              ×
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Progress Display */}
@@ -333,7 +376,7 @@ export default function DuplicateFilesManager() {
             </p>
             <ul className="text-blue-200 text-sm space-y-2 list-disc list-inside">
               <li>Folders: Documents, Downloads, Pictures, Desktop, Videos, Music</li>
-              <li>File size: {minFileSize}KB to {maxFileSize}MB</li>
+              <li>File size: {minFileSizeInput || '0'}KB to {maxFileSizeInput || '500'}MB</li>
               <li>Type filter: {filterType === 'all' ? 'All file types' : filterType}</li>
               <li>Smart scanning with quick pre-filtering for optimal performance</li>
               <li>Supports files up to 500MB without slowing your system</li>

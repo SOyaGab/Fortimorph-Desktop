@@ -173,23 +173,30 @@ export default function DeletedFilesManager() {
     const fileName = file.file_name || file.fileName;
     const isRecycleBin = file.source === 'recycle-bin';
     
-    if (isRecycleBin) {
-      alert('Cannot permanently delete files from Windows Recycle Bin through this app.\n\nPlease use Windows File Explorer to empty the Recycle Bin.');
-      return;
-    }
-    
     const confirmed = window.confirm(
-      `⚠️ PERMANENTLY DELETE "${fileName}"?\n\nThis action CANNOT be undone!`
+      `⚠️ PERMANENTLY DELETE "${fileName}"?\n\nThis action CANNOT be undone!${isRecycleBin ? '\n\nThis will delete the file from Windows Recycle Bin.' : ''}`
     );
 
     if (!confirmed) return;
 
     try {
-      const result = await window.deletedFilesAPI.permanentlyDelete(file.id);
+      let result;
+      if (isRecycleBin) {
+        // For Recycle Bin files, pass the recycleBinPath in options
+        result = await window.deletedFilesAPI.permanentlyDelete(null, {
+          recycleBinPath: file.recycleBinPath
+        });
+      } else {
+        // For internal trash files
+        result = await window.deletedFilesAPI.permanentlyDelete(file.id);
+      }
+      
       if (result.success) {
         alert('File permanently deleted');
         loadDeletedFiles();
         loadStatistics();
+      } else {
+        alert(`Failed to delete file: ${result.error || 'Unknown error'}`);
       }
     } catch (error) {
       console.error('Failed to delete file:', error);
@@ -198,8 +205,16 @@ export default function DeletedFilesManager() {
   }, [loadDeletedFiles, loadStatistics]);
 
   const handleEmptyTrash = useCallback(async () => {
+    const recycleBinCount = deletedFiles.filter(f => f.source === 'recycle-bin').length;
+    const internalCount = deletedFiles.filter(f => f.source === 'internal-trash').length;
+    
     const confirmed = window.confirm(
-      `⚠️ EMPTY TRASH?\n\nThis will PERMANENTLY DELETE all ${deletedFiles.length} files in trash.\n\nThis action CANNOT be undone!`
+      `⚠️ EMPTY ALL TRASH?\n\n` +
+      `This will PERMANENTLY DELETE:\n` +
+      `• ${internalCount} file(s) from internal trash\n` +
+      `• ${recycleBinCount} file(s) from Windows Recycle Bin\n\n` +
+      `Total: ${deletedFiles.length} files\n\n` +
+      `This action CANNOT be undone!`
     );
 
     if (!confirmed) return;
@@ -207,15 +222,17 @@ export default function DeletedFilesManager() {
     try {
       const result = await window.deletedFilesAPI.emptyTrash();
       if (result.success) {
-        alert(`Trash emptied successfully!\n\n${result.deletedCount} files permanently deleted.`);
+        alert(`Trash emptied successfully!\n\n${result.message || `${result.deletedCount} files permanently deleted.`}`);
         loadDeletedFiles();
         loadStatistics();
+      } else {
+        alert(`Failed to empty trash: ${result.error || 'Unknown error'}`);
       }
     } catch (error) {
       console.error('Failed to empty trash:', error);
       alert('Failed to empty trash: ' + error.message);
     }
-  }, [deletedFiles.length, loadDeletedFiles, loadStatistics]);
+  }, [deletedFiles, loadDeletedFiles, loadStatistics]);
 
   const handleBulkRestore = useCallback(async () => {
     if (selectedFiles.size === 0) {
@@ -575,8 +592,8 @@ export default function DeletedFilesManager() {
                   <button
                     onClick={() => handlePermanentDelete(file)}
                     className="px-4 py-2 bg-red-600 hover:bg-red-500 rounded-lg transition flex items-center gap-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                    title={isRecycleBin ? "Can only delete via Windows" : "Permanently delete"}
-                    disabled={isRecycleBin || restoringFiles.has(fileId)}
+                    title="Permanently delete"
+                    disabled={restoringFiles.has(fileId)}
                   >
                     <XCircle className="w-4 h-4" />
                     Delete

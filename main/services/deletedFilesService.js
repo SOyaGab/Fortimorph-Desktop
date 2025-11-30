@@ -805,14 +805,90 @@ class DeletedFilesService {
   }
 
   /**
-   * Empty trash (permanently delete all - only internal trash, not Recycle Bin)
+   * Permanently delete a file from Windows Recycle Bin
    */
-  async emptyTrash() {
+  async permanentlyDeleteFromRecycleBin(recycleBinPath) {
+    try {
+      if (!fs.existsSync(recycleBinPath)) {
+        return { success: false, error: 'File not found in Recycle Bin' };
+      }
+
+      // Get the $I metadata file path
+      const dirPath = path.dirname(recycleBinPath);
+      const fileName = path.basename(recycleBinPath);
+      const identifier = fileName.substring(2); // Remove $R prefix
+      const metaPath = path.join(dirPath, `$I${identifier}`);
+
+      // Delete the actual file
+      const stats = await stat(recycleBinPath);
+      if (stats.isDirectory()) {
+        await this.deleteDirectoryRecursive(recycleBinPath);
+      } else {
+        await unlink(recycleBinPath);
+      }
+
+      // Delete the metadata file if it exists
+      if (fs.existsSync(metaPath)) {
+        await unlink(metaPath);
+      }
+
+      console.log(`Permanently deleted from Recycle Bin: ${recycleBinPath}`);
+
+      // Log the deletion
+      if (this.logsService) {
+        const userId = this.getUserId ? this.getUserId() : null;
+        await this.logsService.info(`File permanently deleted from Recycle Bin`, 'deleted_files', {
+          recycleBinPath
+        }, userId);
+      }
+
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to permanently delete from Recycle Bin:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Empty the entire Windows Recycle Bin using PowerShell
+   */
+  async emptyWindowsRecycleBin() {
+    try {
+      if (process.platform !== 'win32') {
+        return { success: false, error: 'This operation is only supported on Windows' };
+      }
+
+      // Use PowerShell to empty the Recycle Bin
+      // The -Force flag prevents confirmation prompts
+      const command = 'powershell.exe -NoProfile -Command "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"';
+      
+      await execPromise(command);
+      
+      console.log('Windows Recycle Bin emptied successfully');
+
+      // Log the action
+      if (this.logsService) {
+        const userId = this.getUserId ? this.getUserId() : null;
+        await this.logsService.info('Windows Recycle Bin emptied', 'deleted_files', {}, userId);
+      }
+
+      return { success: true, message: 'Windows Recycle Bin emptied successfully' };
+    } catch (error) {
+      console.error('Failed to empty Windows Recycle Bin:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Empty trash (permanently delete all - includes both internal trash and Recycle Bin)
+   */
+  async emptyTrash(includeRecycleBin = true) {
     try {
       const files = await this.getDeletedFiles();
       let deleted = 0;
+      let recycleBinDeleted = 0;
       
-      // Only delete internal trash files, not recycle bin files
+      // Delete internal trash files
       const internalFiles = files.filter(f => f.source === 'internal-trash' && f.id);
       
       for (const file of internalFiles) {
@@ -823,13 +899,26 @@ class DeletedFilesService {
           console.error(`Failed to delete file ${file.id}:`, error);
         }
       }
+
+      // Also empty Windows Recycle Bin if requested
+      if (includeRecycleBin && process.platform === 'win32') {
+        const recycleBinResult = await this.emptyWindowsRecycleBin();
+        if (recycleBinResult.success) {
+          const recycleBinFiles = files.filter(f => f.source === 'recycle-bin');
+          recycleBinDeleted = recycleBinFiles.length;
+        }
+      }
+      
+      const totalDeleted = deleted + recycleBinDeleted;
       
       return {
         success: true,
-        deletedCount: deleted,
-        message: deleted > 0 
-          ? `Deleted ${deleted} files from internal trash. Windows Recycle Bin files were not affected.`
-          : 'No files to delete from internal trash.'
+        deletedCount: totalDeleted,
+        internalDeleted: deleted,
+        recycleBinDeleted: recycleBinDeleted,
+        message: totalDeleted > 0 
+          ? `Deleted ${totalDeleted} files (${deleted} from internal trash, ${recycleBinDeleted} from Recycle Bin).`
+          : 'No files to delete.'
       };
     } catch (error) {
       console.error('Failed to empty trash:', error);

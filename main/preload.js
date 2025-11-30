@@ -154,8 +154,8 @@ contextBridge.exposeInMainWorld('deletedFilesAPI', {
     ipcRenderer.invoke('deletedFiles:getStats'),
   restore: (fileId, options) => 
     ipcRenderer.invoke('deletedFiles:restore', fileId, options),
-  permanentlyDelete: (fileId) => 
-    ipcRenderer.invoke('deletedFiles:permanentlyDelete', fileId),
+  permanentlyDelete: (fileId, options) => 
+    ipcRenderer.invoke('deletedFiles:permanentlyDelete', fileId, options),
   emptyTrash: () => 
     ipcRenderer.invoke('deletedFiles:emptyTrash'),
 });

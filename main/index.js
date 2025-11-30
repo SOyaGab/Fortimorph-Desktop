@@ -1800,13 +1800,20 @@ ipcMain.handle('deletedFiles:restore', async (_event, fileId, options) => {
   }
 });
 
-// Permanently delete file
-ipcMain.handle('deletedFiles:permanentlyDelete', async (_event, fileId) => {
+// Permanently delete file (supports both internal trash and Recycle Bin)
+ipcMain.handle('deletedFiles:permanentlyDelete', async (_event, fileId, options = {}) => {
   try {
     if (!deletedFilesService) {
       return { success: false, error: 'Deleted files service not initialized' };
     }
     
+    // Check if this is a Recycle Bin file
+    if (options.recycleBinPath) {
+      const result = await deletedFilesService.permanentlyDeleteFromRecycleBin(options.recycleBinPath);
+      return result;
+    }
+    
+    // Otherwise, it's an internal trash file
     const result = await deletedFilesService.permanentlyDelete(fileId);
     return result;
   } catch (error) {
