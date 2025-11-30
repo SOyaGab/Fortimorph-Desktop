@@ -18,9 +18,8 @@ jobs:
         with:
           node-version: '18'
           
-      - name: Install dependencies (skip native)
-        run: |
-          npm install --ignore-scripts --legacy-peer-deps
+      - name: Install dependencies
+        run: npm install --ignore-scripts --legacy-peer-deps
         shell: powershell
         
       - name: Build frontend
@@ -39,9 +38,76 @@ jobs:
           name: FortiMorph-Windows
           path: dist/*.exe
 
-  release:
-    needs: build-windows
+  build-macos:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: Install dependencies
+        run: npm install --ignore-scripts --legacy-peer-deps
+        
+      - name: Build frontend
+        run: npm run build:renderer
+        
+      - name: Build macOS app
+        run: npx electron-builder --mac --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: FortiMorph-macOS
+          path: dist/*.dmg
+
+  build-linux:
     runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2
+          
+      - name: Install dependencies
+        run: npm install --ignore-scripts --legacy-peer-deps
+        
+      - name: Build frontend
+        run: npm run build:renderer
+        
+      - name: Build Linux app
+        run: npx electron-builder --linux --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+      - name: Upload Linux installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: FortiMorph-Linux
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+
+  release:
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    if: always() && (needs.build-windows.result == 'success' || needs.build-macos.result == 'success' || needs.build-linux.result == 'success')
     permissions:
       contents: write
       
@@ -51,6 +117,24 @@ jobs:
         with:
           name: FortiMorph-Windows
           path: release
+        continue-on-error: true
+
+      - name: Download macOS build
+        uses: actions/download-artifact@v4
+        with:
+          name: FortiMorph-macOS
+          path: release
+        continue-on-error: true
+
+      - name: Download Linux build
+        uses: actions/download-artifact@v4
+        with:
+          name: FortiMorph-Linux
+          path: release
+        continue-on-error: true
+
+      - name: List release files
+        run: ls -la release/
           
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
