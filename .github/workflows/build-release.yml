@@ -32,7 +32,6 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: fortimorph-desktop/package-lock.json
 
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-latest'
@@ -46,27 +45,22 @@ jobs:
           brew install pkg-config cairo pango libpng jpeg giflib librsvg
           
       - name: Install dependencies
-        working-directory: fortimorph-desktop
         run: npm ci
         
       - name: Rebuild native modules
-        working-directory: fortimorph-desktop
         run: npm run rebuild || echo "No rebuild script, continuing..."
         
       - name: Build application
-        working-directory: fortimorph-desktop
         run: npm run build:renderer
         
       - name: Package for Windows
         if: matrix.platform == 'win'
-        working-directory: fortimorph-desktop
         run: npm run dist:win
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           
       - name: Package for macOS
         if: matrix.platform == 'mac'
-        working-directory: fortimorph-desktop
         run: npm run dist:mac
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -74,13 +68,11 @@ jobs:
           
       - name: Package for Linux
         if: matrix.platform == 'linux'
-        working-directory: fortimorph-desktop
         run: npm run dist:linux
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           
       - name: List dist contents
-        working-directory: fortimorph-desktop
         run: ls -la dist/ || dir dist
         shell: bash
           
@@ -89,8 +81,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fortimorph-windows
-          path: |
-            fortimorph-desktop/dist/*.exe
+          path: dist/*.exe
           if-no-files-found: error
 
       - name: Upload macOS artifact
@@ -98,8 +89,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fortimorph-macos
-          path: |
-            fortimorph-desktop/dist/*.dmg
+          path: dist/*.dmg
           if-no-files-found: error
 
       - name: Upload Linux artifact
@@ -107,8 +97,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fortimorph-linux
-          path: |
-            fortimorph-desktop/dist/*.AppImage
+          path: dist/*.AppImage
           if-no-files-found: error
 
   release:
