@@ -1,6 +1,6 @@
 {
   "name": "fortimorph-desktop",
-  "version": "1.2.1",
+  "version": "1.2.7",
   "description": "FortiMorph - Adaptive Resource Scaling, Task Isolation, Intelligent Backup, and Data Integrity Enhancer",
   "main": "main/index.js",
   "author": "FortiMorph Team",
@@ -90,15 +90,21 @@
     "appId": "com.fortimorph.desktop",
     "productName": "FortiMorph",
     "copyright": "Copyright © 2025 FortiMorph Team",
+    "asar": true,
     "directories": {
-      "output": "dist",
+      "output": "release",
       "buildResources": "build"
     },
     "files": [
       "main/**/*",
       "dist/**/*",
       "assets/**/*",
-      "package.json"
+      "package.json",
+      "node_modules/**/*",
+      "!node_modules/*/{CHANGELOG.md,README.md,readme.md,README,readme}",
+      "!node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
+      "!node_modules/.cache/**/*",
+      "!**/*.{ts,map}"
     ],
     "extraResources": [
       {

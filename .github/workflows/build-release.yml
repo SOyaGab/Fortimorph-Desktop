@@ -18,8 +18,14 @@ jobs:
         with:
           node-version: '18'
           
-      - name: Install dependencies
-        run: npm install --ignore-scripts --legacy-peer-deps
+      - name: Install dependencies (production only)
+        run: npm ci --legacy-peer-deps --omit=dev
+        shell: powershell
+        env:
+          npm_config_optional: false
+        
+      - name: Install dev dependencies for build
+        run: npm install --legacy-peer-deps vite @vitejs/plugin-react tailwindcss postcss autoprefixer electron-builder
         shell: powershell
         
       - name: Build frontend
@@ -36,7 +42,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: FortiMorph-Windows
-          path: dist/*.exe
+          path: release/*.exe
 
   build-macos:
     runs-on: macos-latest
@@ -50,8 +56,13 @@ jobs:
         with:
           node-version: '18'
           
-      - name: Install dependencies
-        run: npm install --ignore-scripts --legacy-peer-deps
+      - name: Install dependencies (production only)
+        run: npm ci --legacy-peer-deps --omit=dev
+        env:
+          npm_config_optional: false
+        
+      - name: Install dev dependencies for build
+        run: npm install --legacy-peer-deps vite @vitejs/plugin-react tailwindcss postcss autoprefixer electron-builder
         
       - name: Build frontend
         run: npm run build:renderer
@@ -66,7 +77,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: FortiMorph-macOS
-          path: dist/*.dmg
+          path: release/*.dmg
 
   build-linux:
     runs-on: ubuntu-latest
@@ -85,8 +96,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfuse2
           
-      - name: Install dependencies
-        run: npm install --ignore-scripts --legacy-peer-deps
+      - name: Install dependencies (production only)
+        run: npm ci --legacy-peer-deps --omit=dev
+        env:
+          npm_config_optional: false
+        
+      - name: Install dev dependencies for build
+        run: npm install --legacy-peer-deps vite @vitejs/plugin-react tailwindcss postcss autoprefixer electron-builder
         
       - name: Build frontend
         run: npm run build:renderer
@@ -101,8 +117,8 @@ jobs:
         with:
           name: FortiMorph-Linux
           path: |
-            dist/*.AppImage
-            dist/*.deb
+            release/*.AppImage
+            release/*.deb
 
   release:
     needs: [build-windows, build-macos, build-linux]
