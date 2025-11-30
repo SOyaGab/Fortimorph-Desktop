@@ -17,6 +17,8 @@ import {
   User,
   Database,
   FolderOpen,
+  File,
+  Folder,
   AlertTriangle,
   CheckCircle2,
   Copy,
@@ -684,8 +686,8 @@ const TokenConfigModal = ({ isOpen, onClose, initialData = {}, onSuccess }) => {
                       disabled={loading}
                       className="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-600 text-white py-3 px-4 rounded-lg font-medium transition flex items-center justify-center gap-2"
                     >
-                      <FolderOpen className="w-5 h-5" />
-                      📄 Browse File
+                      <File className="w-5 h-5" />
+                      Browse File
                     </button>
                     <button
                       type="button"
@@ -693,8 +695,8 @@ const TokenConfigModal = ({ isOpen, onClose, initialData = {}, onSuccess }) => {
                       disabled={loading}
                       className="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-600 text-white py-3 px-4 rounded-lg font-medium transition flex items-center justify-center gap-2"
                     >
-                      <FolderOpen className="w-5 h-5" />
-                      📁 Browse Folder
+                      <Folder className="w-5 h-5" />
+                      Browse Folder
                     </button>
                   </div>
 
@@ -813,8 +815,8 @@ const TokenConfigModal = ({ isOpen, onClose, initialData = {}, onSuccess }) => {
                       disabled={loading}
                       className="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-600 text-white py-2 px-4 rounded-lg font-medium transition flex items-center justify-center gap-2"
                     >
-                      <FolderOpen className="w-4 h-4" />
-                      📄 Browse File
+                      <File className="w-4 h-4" />
+                      Browse File
                     </button>
                     <button
                       type="button"
@@ -822,8 +824,8 @@ const TokenConfigModal = ({ isOpen, onClose, initialData = {}, onSuccess }) => {
                       disabled={loading}
                       className="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-600 text-white py-2 px-4 rounded-lg font-medium transition flex items-center justify-center gap-2"
                     >
-                      <FolderOpen className="w-4 h-4" />
-                      📁 Browse Folder
+                      <Folder className="w-4 h-4" />
+                      Browse Folder
                     </button>
                   </div>
 

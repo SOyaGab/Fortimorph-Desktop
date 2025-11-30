@@ -1639,6 +1639,28 @@ class DatabaseService {
   }
 
   /**
+   * Delete a specific verification token by ID
+   * @param {string} tokenId - Token ID to delete
+   * @returns {boolean} Success status
+   */
+  deleteVerificationToken(tokenId) {
+    try {
+      const stmt = this.db.prepare(
+        'DELETE FROM verification_tokens WHERE token_id = ?'
+      );
+      stmt.bind([tokenId]);
+      stmt.step();
+      stmt.free();
+      this.saveDatabase();
+      console.log(`[Database] Deleted verification token: ${tokenId}`);
+      return true;
+    } catch (error) {
+      console.error('Failed to delete verification token:', error);
+      return false;
+    }
+  }
+
+  /**
    * Get logs with optional type filtering
    * USER ISOLATION: Returns ONLY user's logs (no system logs to prevent data leakage)
    */

@@ -220,8 +220,13 @@ const VerificationCenter = () => {
       // Optimistic UI update - remove token immediately from the list
       setTokens(prev => prev.filter(t => t.tokenId !== tokenId));
 
-      await window.verificationAPI.deleteToken(tokenId);
-      setSuccess('Token deleted successfully');
+      const result = await window.verificationAPI.deleteToken(tokenId);
+      
+      if (result && result.success) {
+        setSuccess('Token deleted successfully');
+      } else {
+        throw new Error(result?.error || 'Failed to delete token');
+      }
     } catch (err) {
       setError('Failed to delete token: ' + err.message);
       // Reload tokens to restore the state if deletion failed
@@ -760,10 +765,22 @@ const VerificationCenter = () => {
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-white">All Tokens</h3>
               <button
-                onClick={() => { cleanupExpiredTokens(); loadTokens(); }}
-                className="bg-gray-700 hover:bg-gray-600 text-white py-2 px-4 rounded-lg font-medium transition-colors flex items-center gap-2"
+                onClick={async () => { 
+                  setLoading(true);
+                  try {
+                    await cleanupExpiredTokens(); 
+                    await loadTokens(); 
+                  } catch (err) {
+                    console.error('Refresh error:', err);
+                    setError('Failed to refresh tokens');
+                  } finally {
+                    setLoading(false);
+                  }
+                }}
+                disabled={loading}
+                className="bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 text-white py-2 px-4 rounded-lg font-medium transition-colors flex items-center gap-2"
               >
-                <RefreshCw className="w-4 h-4" />
+                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
                 Refresh
               </button>
             </div>
