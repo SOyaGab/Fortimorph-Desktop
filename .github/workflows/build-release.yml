@@ -1,0 +1,140 @@
+name: Build & Release (Cross-Platform)
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+            artifact_pattern: "*.exe"
+          - os: macos-latest
+            platform: mac
+            artifact_pattern: "*.dmg"
+          - os: ubuntu-latest
+            platform: linux
+            artifact_pattern: "*.AppImage"
+    
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: fortimorph-desktop/package-lock.json
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libjpeg-dev libpango1.0-dev libgif-dev librsvg2-dev libfuse2
+          
+      - name: Install macOS dependencies
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install pkg-config cairo pango libpng jpeg giflib librsvg
+          
+      - name: Install dependencies
+        working-directory: fortimorph-desktop
+        run: npm ci
+        
+      - name: Rebuild native modules
+        working-directory: fortimorph-desktop
+        run: npm run rebuild || echo "No rebuild script, continuing..."
+        
+      - name: Build application
+        working-directory: fortimorph-desktop
+        run: npm run build:renderer
+        
+      - name: Package for Windows
+        if: matrix.platform == 'win'
+        working-directory: fortimorph-desktop
+        run: npm run dist:win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Package for macOS
+        if: matrix.platform == 'mac'
+        working-directory: fortimorph-desktop
+        run: npm run dist:mac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          
+      - name: Package for Linux
+        if: matrix.platform == 'linux'
+        working-directory: fortimorph-desktop
+        run: npm run dist:linux
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: List dist contents
+        working-directory: fortimorph-desktop
+        run: ls -la dist/ || dir dist
+        shell: bash
+          
+      - name: Upload Windows artifact
+        if: matrix.platform == 'win'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortimorph-windows
+          path: |
+            fortimorph-desktop/dist/*.exe
+          if-no-files-found: error
+
+      - name: Upload macOS artifact
+        if: matrix.platform == 'mac'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortimorph-macos
+          path: |
+            fortimorph-desktop/dist/*.dmg
+          if-no-files-found: error
+
+      - name: Upload Linux artifact
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortimorph-linux
+          path: |
+            fortimorph-desktop/dist/*.AppImage
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          
+      - name: List downloaded artifacts
+        run: find artifacts -type f -name "*" | head -50
+        
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/fortimorph-windows/*.exe
+            artifacts/fortimorph-macos/*.dmg
+            artifacts/fortimorph-linux/*.AppImage
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -85,6 +85,28 @@ class DeletedFilesService {
   }
 
   /**
+   * Move file to trash - cross-platform
+   * Uses Electron's shell.trashItem for Mac/Linux, custom implementation for Windows
+   */
+  async moveToTrash(filePath) {
+    const { shell } = require('electron');
+    
+    if (process.platform === 'win32') {
+      // Use existing Windows implementation via trackDeletion
+      return await this.trackDeletion(filePath);
+    } else {
+      // Use Electron's cross-platform trash for Mac/Linux
+      try {
+        await shell.trashItem(filePath);
+        return { success: true, message: 'File moved to trash' };
+      } catch (error) {
+        console.error('Failed to move to trash:', error);
+        return { success: false, error: error.message };
+      }
+    }
+  }
+
+  /**
    * Parse Windows Recycle Bin metadata - IMPROVED
    */
   async parseRecycleBinItem(itemPath, fileName) {
@@ -211,10 +233,17 @@ class DeletedFilesService {
 
   /**
    * Get all files from Windows Recycle Bin - IMPROVED
+   * Returns empty array with message on non-Windows platforms
    */
   async getRecycleBinFiles() {
-    if (process.platform !== 'win32' || !this.recycleBinPaths) {
-      console.log('Not on Windows or no Recycle Bin paths found');
+    // Only available on Windows
+    if (process.platform !== 'win32') {
+      console.log('Recycle Bin viewing is only available on Windows');
+      return [];
+    }
+    
+    if (!this.recycleBinPaths) {
+      console.log('No Recycle Bin paths found');
       return [];
     }
     

@@ -1,6 +1,6 @@
 {
   "name": "fortimorph-desktop",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "FortiMorph - Adaptive Resource Scaling, Task Isolation, Intelligent Backup, and Data Integrity Enhancer",
   "main": "main/index.js",
   "author": "FortiMorph Team",
@@ -11,7 +11,14 @@
     "dev:renderer": "vite",
     "dev:main": "set NODE_ENV=development&& wait-on http://localhost:5173 && electron .",
     "build": "vite build && electron-builder",
+    "build:renderer": "vite build",
     "build:win": "vite build && electron-builder --win",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux",
+    "dist:all": "electron-builder --win --mac --linux",
+    "rebuild": "electron-rebuild -f -w canvas,sharp,bcrypt",
     "lint": "eslint . --ext .js,.jsx",
     "format": "prettier --write \"**/*.{js,jsx,json,md}\"",
     "prepare": "husky install",
@@ -79,6 +86,7 @@
   "build": {
     "appId": "com.fortimorph.desktop",
     "productName": "FortiMorph",
+    "copyright": "Copyright © 2025 FortiMorph Team",
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -86,17 +94,64 @@
     "files": [
       "main/**/*",
       "dist/**/*",
+      "assets/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "data",
+        "to": "data",
+        "filter": ["**/*"]
+      }
     ],
     "win": {
       "target": [
-        "nsis"
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
       ],
       "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "FortiMorph"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["x64", "arm64"]
+        }
+      ],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.utilities",
+      "identity": null
+    },
+    "dmg": {
+      "title": "FortiMorph Installer",
+      "contents": [
+        { "x": 130, "y": 220 },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ]
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": ["x64"]
+        },
+        {
+          "target": "deb",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.png",
+      "category": "Utility",
+      "maintainer": "FortiMorph Team"
     }
   }
 }
