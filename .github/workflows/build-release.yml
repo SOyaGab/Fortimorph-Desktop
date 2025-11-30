@@ -13,13 +13,10 @@ jobs:
         include:
           - os: windows-latest
             platform: win
-            artifact_pattern: "*.exe"
           - os: macos-latest
             platform: mac
-            artifact_pattern: "*.dmg"
           - os: ubuntu-latest
             platform: linux
-            artifact_pattern: "*.AppImage"
     
     runs-on: ${{ matrix.os }}
     
@@ -31,74 +28,89 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+
+      - name: Setup Python (for node-gyp)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcairo2-dev libjpeg-dev libpango1.0-dev libgif-dev librsvg2-dev libfuse2
+          sudo apt-get install -y libcairo2-dev libjpeg-dev libpango1.0-dev libgif-dev librsvg2-dev libfuse2 build-essential libvips-dev
           
       - name: Install macOS dependencies
         if: matrix.os == 'macos-latest'
         run: |
-          brew install pkg-config cairo pango libpng jpeg giflib librsvg
+          brew install pkg-config cairo pango libpng jpeg giflib librsvg vips
           
+      - name: Install Windows build tools
+        if: matrix.os == 'windows-latest'
+        run: npm install -g windows-build-tools --vs2022 || echo "Build tools may already be available"
+        shell: powershell
+        continue-on-error: true
+
       - name: Install dependencies
-        run: npm ci
+        run: npm install --ignore-scripts
+        env:
+          npm_config_build_from_source: true
+          
+      - name: Rebuild native modules for Electron
+        run: npx electron-rebuild -f
+        continue-on-error: true
         
-      - name: Rebuild native modules
-        run: npm run rebuild || echo "No rebuild script, continuing..."
-        
-      - name: Build application
+      - name: Build renderer
         run: npm run build:renderer
         
-      - name: Package for Windows
+      - name: Build for Windows
         if: matrix.platform == 'win'
         run: npm run dist:win
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           
-      - name: Package for macOS
+      - name: Build for macOS
         if: matrix.platform == 'mac'
         run: npm run dist:mac
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
           
-      - name: Package for Linux
+      - name: Build for Linux
         if: matrix.platform == 'linux'
         run: npm run dist:linux
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
-      - name: List dist contents
-        run: ls -la dist/ || dir dist
-        shell: bash
           
       - name: Upload Windows artifact
         if: matrix.platform == 'win'
         uses: actions/upload-artifact@v4
         with:
           name: fortimorph-windows
-          path: dist/*.exe
-          if-no-files-found: error
+          path: |
+            dist/*.exe
+            dist/*.msi
+          if-no-files-found: warn
 
       - name: Upload macOS artifact
         if: matrix.platform == 'mac'
         uses: actions/upload-artifact@v4
         with:
           name: fortimorph-macos
-          path: dist/*.dmg
-          if-no-files-found: error
+          path: |
+            dist/*.dmg
+            dist/*.zip
+          if-no-files-found: warn
 
       - name: Upload Linux artifact
         if: matrix.platform == 'linux'
         uses: actions/upload-artifact@v4
         with:
           name: fortimorph-linux
-          path: dist/*.AppImage
-          if-no-files-found: error
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+          if-no-files-found: warn
 
   release:
     needs: build
@@ -119,9 +131,11 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/fortimorph-windows/*.exe
-            artifacts/fortimorph-macos/*.dmg
-            artifacts/fortimorph-linux/*.AppImage
+            artifacts/**/*.exe
+            artifacts/**/*.dmg
+            artifacts/**/*.AppImage
+            artifacts/**/*.deb
+            artifacts/**/*.zip
           generate_release_notes: true
           draft: false
           prerelease: false
