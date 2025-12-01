@@ -1,6 +1,6 @@
 {
   "name": "fortimorph-desktop",
-  "version": "1.2.7",
+  "version": "1.2.8",
   "description": "FortiMorph - Adaptive Resource Scaling, Task Isolation, Intelligent Backup, and Data Integrity Enhancer",
   "main": "main/index.js",
   "author": "FortiMorph Team",

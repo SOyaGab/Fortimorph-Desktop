@@ -32,11 +32,11 @@ class BatteryService {
     
     this.currentMode = this.modes.BALANCED;
     
-    // Adaptive polling intervals (in milliseconds)
+    // Adaptive polling intervals (in milliseconds) - OPTIMIZED for performance
     this.pollingIntervals = {
-      [this.modes.SAVER]: 60000,      // 60 seconds - slowest
-      [this.modes.BALANCED]: 30000,    // 30 seconds - default
-      [this.modes.PERFORMANCE]: 10000  // 10 seconds - fastest
+      [this.modes.SAVER]: 120000,      // 2 minutes - battery saver
+      [this.modes.BALANCED]: 60000,    // 1 minute - default (was 30s)
+      [this.modes.PERFORMANCE]: 30000  // 30 seconds - fastest (was 10s)
     };
     
     // Battery state tracking
@@ -73,10 +73,10 @@ class BatteryService {
     // Load persistent tracking data
     this.loadPersistentTracking();
     
-    // Alert system
+    // Alert system - with longer cooldowns to prevent notification spam
     this.alerts = [];
     this.alertCooldowns = new Map(); // Alert type -> last triggered timestamp
-    this.cooldownDuration = 300000; // 5 minutes in milliseconds
+    this.cooldownDuration = 900000; // 15 minutes in milliseconds (was 5 min)
     
     // Alert thresholds
     this.thresholds = {
@@ -88,7 +88,7 @@ class BatteryService {
       healthWarning: 80          // Battery health % warning
     };
     
-    // Alert rules configuration
+    // Alert rules configuration - with LONGER cooldowns to reduce notification spam
     this.alertRules = [
       {
         id: 'critical_battery',
@@ -96,7 +96,7 @@ class BatteryService {
         check: (data) => !data.isCharging && data.percent <= this.thresholds.criticalBattery,
         message: (data) => `Critical battery level: ${data.percent}%. Connect charger immediately.`,
         action: 'Enable power saving mode and close unnecessary applications.',
-        cooldown: 600000 // 10 minutes
+        cooldown: 1800000 // 30 minutes (was 10 min)
       },
       {
         id: 'low_battery',
@@ -104,7 +104,7 @@ class BatteryService {
         check: (data) => !data.isCharging && data.percent <= this.thresholds.lowBattery && data.percent > this.thresholds.criticalBattery,
         message: (data) => `Low battery: ${data.percent}%. Consider charging soon.`,
         action: 'Reduce screen brightness and close background applications.',
-        cooldown: 300000 // 5 minutes
+        cooldown: 1800000 // 30 minutes (was 5 min)
       },
       {
         id: 'rapid_drain',
@@ -117,7 +117,7 @@ class BatteryService {
         },
         message: (data) => `Rapid battery drain detected. Current level: ${data.percent}%.`,
         action: 'Check for resource-intensive applications and consider switching to battery saver mode.',
-        cooldown: 600000 // 10 minutes
+        cooldown: 3600000 // 1 hour (was 10 min)
       },
       {
         id: 'high_temperature',
@@ -125,7 +125,7 @@ class BatteryService {
         check: (data) => data.temperature && data.temperature >= this.thresholds.highTemp,
         message: (data) => `High battery temperature: ${data.temperature}°C`,
         action: 'Allow device to cool down. Avoid charging and reduce CPU load.',
-        cooldown: 900000 // 15 minutes
+        cooldown: 3600000 // 1 hour (was 15 min)
       },
       {
         id: 'health_warning',
@@ -149,7 +149,7 @@ class BatteryService {
         check: (data) => data.isCharging && data.percent >= 95,
         message: () => `Battery fully charged. Unplug to preserve battery health.`,
         action: 'Disconnect charger to prevent overcharging and extend battery lifespan.',
-        cooldown: 3600000 // 1 hour
+        cooldown: 7200000 // 2 hours (was 1 hour)
       }
     ];
   }
@@ -219,25 +219,23 @@ class BatteryService {
         }, 'error', userId);
       }
       
-      // OPTIMIZED: Start process tracking quickly and run frequently
-      // First scan after 2 seconds for immediate data
-      console.log('[Battery Init] Scheduling IMMEDIATE initial process scan (2s)...');
+      // OPTIMIZED: Start process tracking with reasonable delays to prevent system lag
+      // First scan after 10 seconds to let system stabilize
+      console.log('[Battery Init] Scheduling initial process scan (10s delay)...');
       setTimeout(() => {
-        console.log('[Battery Init] Running first quick process scan...');
+        console.log('[Battery Init] Running first process scan...');
         this.updateProcessTrackingAsync().catch(err => {
           console.error('Initial process scan failed (non-critical):', err);
         });
-      }, 2000); // Wait only 2 seconds for first data
+      }, 10000); // Wait 10 seconds for system to stabilize
       
-      // Schedule regular updates every 8 seconds for real-time tracking
+      // Schedule regular updates every 60 seconds - balanced between accuracy and performance
       this.processTrackingInterval = setInterval(() => {
-        if (process.env.NODE_ENV === 'development') {
-          console.log('[Battery Service] Running scheduled process tracking update...');
-        }
+        // Reduced logging to minimize overhead
         this.updateProcessTrackingAsync().catch(err => {
           console.error('Scheduled process scan failed (non-critical):', err);
         });
-      }, 8000); // Every 8 seconds for responsive updates (was 120000)
+      }, 60000); // Every 60 seconds (was 8s - caused system hangs)
       
       // Schedule data retention cleanup (keep 30 days)
       this.scheduleDataRetention(30);

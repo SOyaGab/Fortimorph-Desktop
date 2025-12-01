@@ -17,13 +17,13 @@ class BackgroundMonitor {
     this.db = dbService;
     this.isRunning = false;
     this.monitorInterval = null;
-    this.dataCollectionInterval = 8000; // 8 seconds (same as main service)
+    this.dataCollectionInterval = 60000; // 60 seconds - optimized for performance (was 8s)
     this.processTracking = new Map();
     this.lastUpdate = Date.now();
     
     // Performance optimization
     this.batchQueue = [];
-    this.batchSize = 10; // Batch database writes
+    this.batchSize = 20; // Larger batch for fewer writes (was 10)
     this.batchTimer = null;
     
     // Health tracking
@@ -109,9 +109,10 @@ class BackgroundMonitor {
         return;
       }
 
-      // Filter relevant processes (only apps using significant resources)
+      // Filter relevant processes - only track significant resource users
+      // Increased thresholds to reduce tracking overhead
       const relevantProcesses = processes.list.filter(proc => 
-        proc.cpu > 0.1 || proc.mem > 0.1 // Only track if CPU > 0.1% or RAM > 0.1%
+        proc.cpu > 1.0 || proc.mem > 1.0 // Only track if CPU > 1% or RAM > 1% (was 0.1%)
       );
 
       // Update tracking
@@ -187,10 +188,10 @@ class BackgroundMonitor {
     if (this.batchQueue.length >= this.batchSize) {
       this.flushBatchQueue();
     } else if (!this.batchTimer) {
-      // Or write after 30 seconds (whichever comes first)
+      // Or write after 2 minutes (whichever comes first) - reduces I/O
       this.batchTimer = setTimeout(() => {
         this.flushBatchQueue();
-      }, 30000);
+      }, 120000);
     }
   }
 

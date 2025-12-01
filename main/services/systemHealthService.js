@@ -88,7 +88,7 @@ class SystemHealthService {
     }
     
     this.isMonitoring = true;
-    const interval = 30000; // 30 seconds
+    const interval = 120000; // 2 minutes - optimized for performance (was 30s)
     
     console.log(`Starting system health monitoring with ${interval}ms interval`);
     
@@ -96,8 +96,8 @@ class SystemHealthService {
       await this.collectHealthData();
     }, interval);
     
-    // Initial collection
-    this.collectHealthData();
+    // Initial collection after a delay to let system stabilize
+    setTimeout(() => this.collectHealthData(), 5000);
   }
 
   /**
