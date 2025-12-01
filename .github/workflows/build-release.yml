@@ -18,14 +18,8 @@ jobs:
         with:
           node-version: '18'
           
-      - name: Install dependencies (production only)
-        run: npm ci --legacy-peer-deps --omit=dev
-        shell: powershell
-        env:
-          npm_config_optional: false
-        
-      - name: Install dev dependencies for build
-        run: npm install --legacy-peer-deps vite @vitejs/plugin-react tailwindcss postcss autoprefixer electron-builder
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
         shell: powershell
         
       - name: Build frontend
@@ -42,7 +36,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: FortiMorph-Windows
-          path: release/*.exe
+          path: dist/*.exe
 
   build-macos:
     runs-on: macos-latest
@@ -55,14 +49,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
+
+      - name: Install system dependencies
+        run: |
+          brew install pkg-config cairo pango libpng jpeg giflib librsvg vips
           
-      - name: Install dependencies (production only)
-        run: npm ci --legacy-peer-deps --omit=dev
-        env:
-          npm_config_optional: false
-        
-      - name: Install dev dependencies for build
-        run: npm install --legacy-peer-deps vite @vitejs/plugin-react tailwindcss postcss autoprefixer electron-builder
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
         
       - name: Build frontend
         run: npm run build:renderer
@@ -77,7 +70,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: FortiMorph-macOS
-          path: release/*.dmg
+          path: dist/*.dmg
 
   build-linux:
     runs-on: ubuntu-latest
@@ -94,15 +87,10 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libfuse2
+          sudo apt-get install -y libfuse2 build-essential libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev libvips-dev
           
-      - name: Install dependencies (production only)
-        run: npm ci --legacy-peer-deps --omit=dev
-        env:
-          npm_config_optional: false
-        
-      - name: Install dev dependencies for build
-        run: npm install --legacy-peer-deps vite @vitejs/plugin-react tailwindcss postcss autoprefixer electron-builder
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
         
       - name: Build frontend
         run: npm run build:renderer
@@ -117,8 +105,8 @@ jobs:
         with:
           name: FortiMorph-Linux
           path: |
-            release/*.AppImage
-            release/*.deb
+            dist/*.AppImage
+            dist/*.deb
 
   release:
     needs: [build-windows, build-macos, build-linux]

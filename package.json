@@ -90,21 +90,15 @@
     "appId": "com.fortimorph.desktop",
     "productName": "FortiMorph",
     "copyright": "Copyright © 2025 FortiMorph Team",
-    "asar": true,
     "directories": {
-      "output": "release",
+      "output": "dist",
       "buildResources": "build"
     },
     "files": [
       "main/**/*",
       "dist/**/*",
       "assets/**/*",
-      "package.json",
-      "node_modules/**/*",
-      "!node_modules/*/{CHANGELOG.md,README.md,readme.md,README,readme}",
-      "!node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
-      "!node_modules/.cache/**/*",
-      "!**/*.{ts,map}"
+      "package.json"
     ],
     "extraResources": [
       {
