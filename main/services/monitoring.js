@@ -505,15 +505,22 @@ class MonitoringService {
       // Sort by memory
       processList.sort((a, b) => b.memory - a.memory);
       
-      // Format with memory data only - CPU will come from stream
+      // Build a map of cached CPU values for quick lookup
+      const cachedCpuMap = new Map();
+      for (const proc of this.cachedProcessList) {
+        if (proc.cpuPercent > 0) {
+          cachedCpuMap.set(proc.pid, proc.cpuPercent);
+        }
+      }
+      
+      // Format with memory data only - CPU will come from cache or stream
       const totalMem = os.totalmem();
       const formattedProcesses = processList.map(proc => {
         const memValue = proc.memory || 0;
         const memPercent = (memValue / totalMem) * 100;
         
         // Use cached CPU if available, otherwise show 0
-        const cachedProc = this.cachedProcessList.find(p => p.pid === proc.pid);
-        const cpuValue = cachedProc?.cpuPercent || 0;
+        const cpuValue = cachedCpuMap.get(proc.pid) || 0;
         
         return {
           pid: proc.pid,
@@ -531,8 +538,10 @@ class MonitoringService {
         };
       }).sort((a, b) => b.memoryPercentNum - a.memoryPercentNum);
       
-      // Update cache with instant data
-      if (formattedProcesses.length > 0) {
+      // Only update cache if we have some processes with CPU data
+      // This prevents overwriting good cache with all-zero data
+      const hasAnyCpuData = formattedProcesses.some(p => p.cpuPercent > 0);
+      if (hasAnyCpuData || this.cachedProcessList.length === 0) {
         this.cachedProcessList = formattedProcesses;
       }
       
