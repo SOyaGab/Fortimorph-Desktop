@@ -1,149 +1,254 @@
-name: Build & Release
+name: 🚀 Build & Release
 
 on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., 1.2.8)'
+        required: false
+        default: ''
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_OPTIONS: '--max-old-space-size=4096'
 
 jobs:
+  # ===== WINDOWS BUILD (PRIMARY) =====
   build-windows:
+    name: 🖥️ Windows Build
     runs-on: windows-latest
+    timeout-minutes: 45
     
     steps:
-      - name: Checkout
+      - name: 📥 Checkout
         uses: actions/checkout@v4
         
-      - name: Setup Node.js
+      - name: 📦 Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
+          cache: 'npm'
           
-      - name: Install dependencies
-        run: npm install --legacy-peer-deps
+      - name: 🔧 Install dependencies
+        run: npm ci
         shell: powershell
         
-      - name: Build frontend
+      - name: 🏗️ Build frontend
         run: npm run build:renderer
         shell: powershell
         
-      - name: Build Windows app
-        run: npx electron-builder --win --publish never
+      - name: 📦 Package Windows app (x64)
+        run: npx electron-builder --win --x64 --publish never
         shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: 📋 List build outputs
+        run: Get-ChildItem dist -Recurse -Include *.exe | Select-Object FullName, Length
+        shell: powershell
         
-      - name: Upload Windows installer
+      - name: 📤 Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: FortiMorph-Windows
-          path: dist/*.exe
+          name: FortiMorph-Windows-x64
+          path: |
+            dist/*.exe
+          retention-days: 30
 
+  # ===== MACOS BUILD =====
   build-macos:
+    name: 🍎 macOS Build
     runs-on: macos-latest
+    timeout-minutes: 45
     
     steps:
-      - name: Checkout
+      - name: 📥 Checkout
         uses: actions/checkout@v4
         
-      - name: Setup Node.js
+      - name: 📦 Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
+          cache: 'npm'
 
-      - name: Install system dependencies
+      - name: 🔧 Install system dependencies
         run: |
           brew install pkg-config cairo pango libpng jpeg giflib librsvg vips
           
-      - name: Install dependencies
-        run: npm install --legacy-peer-deps
+      - name: 🔧 Install dependencies
+        run: npm ci
         
-      - name: Build frontend
+      - name: 🏗️ Build frontend
         run: npm run build:renderer
         
-      - name: Build macOS app
+      - name: 📦 Package macOS app
         run: npx electron-builder --mac --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
         
-      - name: Upload macOS installer
+      - name: 📤 Upload macOS installer
         uses: actions/upload-artifact@v4
         with:
           name: FortiMorph-macOS
           path: dist/*.dmg
+          retention-days: 30
 
+  # ===== LINUX BUILD =====
   build-linux:
+    name: 🐧 Linux Build
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     
     steps:
-      - name: Checkout
+      - name: 📥 Checkout
         uses: actions/checkout@v4
         
-      - name: Setup Node.js
+      - name: 📦 Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
+          cache: 'npm'
 
-      - name: Install Linux build dependencies
+      - name: 🔧 Install Linux build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libfuse2 build-essential libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev libvips-dev
           
-      - name: Install dependencies
-        run: npm install --legacy-peer-deps
+      - name: 🔧 Install dependencies
+        run: npm ci
         
-      - name: Build frontend
+      - name: 🏗️ Build frontend
         run: npm run build:renderer
         
-      - name: Build Linux app
+      - name: 📦 Package Linux app
         run: npx electron-builder --linux --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         
-      - name: Upload Linux installer
+      - name: 📤 Upload Linux installer
         uses: actions/upload-artifact@v4
         with:
           name: FortiMorph-Linux
           path: |
             dist/*.AppImage
             dist/*.deb
+          retention-days: 30
 
+  # ===== CREATE RELEASE =====
   release:
+    name: 📢 Create Release
     needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
-    if: always() && (needs.build-windows.result == 'success' || needs.build-macos.result == 'success' || needs.build-linux.result == 'success')
+    if: always() && needs.build-windows.result == 'success'
     permissions:
       contents: write
+    timeout-minutes: 15
       
     steps:
-      - name: Download Windows build
+      - name: 📥 Download Windows build
         uses: actions/download-artifact@v4
         with:
-          name: FortiMorph-Windows
+          name: FortiMorph-Windows-x64
           path: release
-        continue-on-error: true
+        continue-on-error: false
 
-      - name: Download macOS build
+      - name: 📥 Download macOS build
         uses: actions/download-artifact@v4
         with:
           name: FortiMorph-macOS
           path: release
         continue-on-error: true
 
-      - name: Download Linux build
+      - name: 📥 Download Linux build
         uses: actions/download-artifact@v4
         with:
           name: FortiMorph-Linux
           path: release
         continue-on-error: true
 
-      - name: List release files
-        run: ls -la release/
+      - name: 📋 List release files
+        run: |
+          echo "📦 Release files:"
+          ls -la release/
+          echo ""
+          echo "📊 File sizes:"
+          du -h release/*
           
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+      - name: 🚀 Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
           files: release/*
           generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'alpha') }}
+          body: |
+            ## 🎉 FortiMorph Release
+            
+            ### 📥 Downloads
+            
+            | Platform | File | Notes |
+            |----------|------|-------|
+            | **Windows** | `FortiMorph-Setup-*.exe` | ✅ Recommended for Windows 10/11 |
+            | macOS | `FortiMorph-*.dmg` | For Intel and Apple Silicon Macs |
+            | Linux | `FortiMorph-*.AppImage` | Universal Linux package |
+            | Linux | `FortiMorph-*.deb` | Debian/Ubuntu package |
+            
+            ### 🔒 Security Notes
+            - Windows SmartScreen may show a warning on first run (app is not code-signed)
+            - Click "More info" → "Run anyway" to proceed
+            - The app is safe and open-source
+            
+            ### 📋 Installation
+            1. Download the installer for your platform
+            2. Run the installer and follow the prompts
+            3. Launch FortiMorph from your applications
+            
+            ---
+            *Built automatically via GitHub Actions*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ===== WINDOWS-ONLY QUICK RELEASE =====
+  quick-release-windows:
+    name: ⚡ Quick Windows Release
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          
+      - name: 🔧 Install dependencies
+        run: npm ci
+        shell: powershell
+        
+      - name: 🏗️ Build and package
+        run: |
+          npm run build:renderer
+          npx electron-builder --win --x64 --publish never
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: 📤 Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: FortiMorph-Windows-Quick
+          path: dist/*.exe
+          retention-days: 7

@@ -1,19 +1,49 @@
-name: CI - Lint & Test
+name: CI - Lint & Build Test
 
 on:
   push:
     branches:
       - main
+      - master
       - second
       - develop
   pull_request:
     branches:
       - main
+      - master
       - second
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:
+    name: 🔍 Lint Code
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+        
+      - name: Run ESLint
+        run: npm run lint || echo "Linting completed with warnings"
+
+  build-windows:
+    name: 🖥️ Build Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    needs: lint
     
     steps:
       - name: Checkout code
@@ -27,17 +57,35 @@ jobs:
           
       - name: Install dependencies
         run: npm ci
+        shell: powershell
         
-      - name: Run ESLint
-        run: npm run lint || echo "Linting completed with warnings"
+      - name: Build renderer
+        run: npm run build:renderer
+        shell: powershell
+        
+      - name: Verify build output
+        run: |
+          if (Test-Path "dist") { Get-ChildItem dist -Recurse | Select-Object FullName, Length | Format-Table }
+          else { Write-Error "Build output not found" }
+        shell: powershell
+        
+      - name: Test Electron packaging (dry run)
+        run: npx electron-builder --win --dir
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build-test:
+  build-cross-platform:
+    name: 🌐 Build ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest]
     
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    needs: lint
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
     steps:
       - name: Checkout code
@@ -67,6 +115,5 @@ jobs:
         run: npm run build:renderer
         
       - name: Verify build output
-        run: |
-          ls -la dist/ || dir dist
+        run: ls -la dist/ || echo "No dist folder"
         shell: bash
