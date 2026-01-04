@@ -287,7 +287,7 @@ const Dashboard = () => {
     return () => clearInterval(timer);
   }, []);
   
-  // Real-time process streaming when Processes tab is active - ROBUST implementation
+  // Real-time process streaming when Processes tab is active - STABLE implementation
   useEffect(() => {
     if (selectedView !== 'processes') {
       // Stop streaming when leaving processes view
@@ -296,15 +296,17 @@ const Dashboard = () => {
       return;
     }
     
-    console.log('[Processes] Tab selected - starting ROBUST loading');
+    console.log('[Processes] Tab selected - starting stable stream');
     window.electronAPI.system.setTabVisibility(true);
     
     let isMounted = true;
+    let hasReceivedData = false;
     
-    // IMMEDIATE: Set up stream listener FIRST before any API calls
+    // Set up stream listener - this is the ONLY source of process updates
     const handleProcessUpdate = (result) => {
       if (!isMounted) return;
       if (result?.success && Array.isArray(result.data) && result.data.length > 0) {
+        hasReceivedData = true;
         console.log('[Processes] Stream update:', result.data.length, 'processes');
         setProcesses(result.data);
       }
@@ -312,29 +314,19 @@ const Dashboard = () => {
     
     window.electronAPI.system.onProcessUpdate(handleProcessUpdate);
     
-    // Fire all data loading in parallel - don't wait for anything
-    // Method 1: Direct instant fetch
-    window.electronAPI.system.getProcesses({ instant: true })
-      .then(result => {
-        if (isMounted && result?.success && result.data?.length > 0) {
-          console.log('[Processes] ⚡ Direct instant:', result.data.length);
-          setProcesses(result.data);
-        }
-      })
-      .catch(err => console.warn('[Processes] Direct instant error:', err));
-    
-    // Method 2: Start stream (also sends instant data)
+    // Start the stream - it will send data through the update handler
     window.electronAPI.system.startProcessStream()
       .then(result => {
         if (result?.success) {
-          console.log('[Processes] Stream started');
+          console.log('[Processes] Stream started successfully');
         }
       })
       .catch(err => console.warn('[Processes] Stream start error:', err));
     
-    // Method 3: Fallback - fetch with CPU enrichment after 500ms
+    // Fallback: If no data received after 1 second, do a direct fetch
     const fallbackTimer = setTimeout(() => {
-      if (isMounted) {
+      if (isMounted && !hasReceivedData) {
+        console.log('[Processes] No stream data yet, fetching directly...');
         window.electronAPI.system.getProcesses({ freshFetch: true })
           .then(result => {
             if (isMounted && result?.success && result.data?.length > 0) {
@@ -344,7 +336,7 @@ const Dashboard = () => {
           })
           .catch(() => {});
       }
-    }, 500);
+    }, 1000);
     
     // Cleanup
     return () => {

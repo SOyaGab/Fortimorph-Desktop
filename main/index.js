@@ -563,52 +563,64 @@ ipcMain.handle('system:get-metrics', async () => {
   }
 });
 
+// Stable process cache to prevent count fluctuation
+let stableProcessCache = [];
+let lastStableProcessCount = 0;
+
 ipcMain.handle('system:get-processes', async (event, options = {}) => {
   try {
-    // Helper function to check if process data has meaningful CPU/memory values
-    const hasQualityData = (data) => {
-      if (!data || data.length === 0) return false;
-      const withValues = data.filter(p => 
-        (p.cpuPercent > 0 || parseFloat(p.cpu) > 0) || 
-        (p.memoryPercentNum > 1 || parseFloat(p.memoryPercent) > 1)
-      );
-      return withValues.length >= Math.min(5, data.length * 0.1);
+    // Helper function to enrich process data with battery service CPU values
+    const enrichWithBatteryData = (processes) => {
+      if (!batteryService || !processes || processes.length === 0) return processes;
+      
+      const batteryData = batteryService.getTrackedProcessList();
+      if (!batteryData || batteryData.length === 0) return processes;
+      
+      const cpuLookup = new Map();
+      for (const proc of batteryData) {
+        if (proc.cpuPercent > 0 || parseFloat(proc.cpu) > 0) {
+          cpuLookup.set(proc.pid, {
+            cpu: proc.cpu,
+            cpuPercent: proc.cpuPercent
+          });
+        }
+      }
+      
+      return processes.map(proc => {
+        const cpuData = cpuLookup.get(proc.pid);
+        if (cpuData && (proc.cpuPercent === 0 || parseFloat(proc.cpu) === 0)) {
+          return { ...proc, cpu: cpuData.cpu, cpuPercent: cpuData.cpuPercent };
+        }
+        return proc;
+      });
     };
 
-    // For instant mode, prefer battery service as it has accumulated CPU data
-    if (options.instant && batteryService) {
-      const batteryData = batteryService.getTrackedProcessList();
-      if (hasQualityData(batteryData)) {
-        console.log('[system:get-processes] Using battery service data (has quality CPU values)');
-        return { success: true, data: batteryData };
-      }
-    }
-
-    // Try primary method
+    // Always use monitoring service - it returns ALL processes from tasklist
     let processes = await monitoringService.getProcessList(options);
     
-    // Fallback to battery service if primary has no quality data
-    if (!hasQualityData(processes) && batteryService) {
-      const batteryData = batteryService.getTrackedProcessList();
-      if (hasQualityData(batteryData)) {
-        console.log('[system:get-processes] Primary has no quality data, using battery service');
-        return { success: true, data: batteryData };
+    if (processes && processes.length > 0) {
+      // Update stable cache only if we got a reasonable count (prevent drops)
+      if (processes.length >= lastStableProcessCount * 0.8 || lastStableProcessCount === 0) {
+        stableProcessCache = processes;
+        lastStableProcessCount = processes.length;
       }
+      processes = enrichWithBatteryData(processes);
+      return { success: true, data: processes };
     }
     
-    return { success: true, data: processes || [] };
+    // If monitoring failed, return cached data (don't fall back to battery-only)
+    if (stableProcessCache.length > 0) {
+      console.log('[system:get-processes] Using stable cache:', stableProcessCache.length);
+      return { success: true, data: enrichWithBatteryData(stableProcessCache) };
+    }
+    
+    return { success: true, data: [] };
   } catch (error) {
     console.error('Error getting process list:', error);
-    
-    // Even on error, try to return battery service data as fallback
-    if (batteryService) {
-      const fallbackData = batteryService.getTrackedProcessList();
-      if (fallbackData && fallbackData.length > 0) {
-        console.log('[system:get-processes] Using battery service fallback after error');
-        return { success: true, data: fallbackData };
-      }
+    // On error, return cached data instead of battery-only
+    if (stableProcessCache.length > 0) {
+      return { success: true, data: stableProcessCache };
     }
-    
     return { success: false, error: error.message };
   }
 });
@@ -616,47 +628,66 @@ ipcMain.handle('system:get-processes', async (event, options = {}) => {
 // Real-time process streaming for Processes tab with adaptive polling
 let processStreamInterval = null;
 let isStreamActive = false;
-let currentPollInterval = 3000; // Start with 3 seconds
+let currentPollInterval = 2000; // 2 seconds for smooth updates
 let consecutiveNoChangeCount = 0;
 let isTabVisible = true;
 
 ipcMain.handle('system:start-process-stream', async (event) => {
   try {
-    // Helper function to check if process data has meaningful CPU/memory values
-    const hasQualityData = (data) => {
-      if (!data || data.length === 0) return false;
-      // Check if at least 5% of processes have non-zero CPU or meaningful memory
-      const withValues = data.filter(p => 
-        (p.cpuPercent > 0 || parseFloat(p.cpu) > 0) || 
-        (p.memoryPercentNum > 1 || parseFloat(p.memoryPercent) > 1)
-      );
-      return withValues.length >= Math.min(5, data.length * 0.1);
-    };
-
-    // Helper function to get best available process data
-    const getBestProcessData = async () => {
-      // Try battery service first - it has accumulated CPU data
-      if (batteryService) {
-        const batteryData = batteryService.getTrackedProcessList();
-        if (hasQualityData(batteryData)) {
-          return batteryData;
+    // Helper function to enrich process data with battery service CPU values
+    const enrichWithBatteryData = (processes) => {
+      if (!batteryService || !processes || processes.length === 0) return processes;
+      
+      const batteryData = batteryService.getTrackedProcessList();
+      if (!batteryData || batteryData.length === 0) return processes;
+      
+      const cpuLookup = new Map();
+      for (const proc of batteryData) {
+        if (proc.cpuPercent > 0 || parseFloat(proc.cpu) > 0) {
+          cpuLookup.set(proc.pid, { cpu: proc.cpu, cpuPercent: proc.cpuPercent });
         }
       }
       
-      // Try monitoring service with CPU enrichment
-      let data = await monitoringService.getProcessList({ freshFetch: true }).catch(() => []);
-      if (hasQualityData(data)) {
-        return data;
+      return processes.map(proc => {
+        const cpuData = cpuLookup.get(proc.pid);
+        if (cpuData && (proc.cpuPercent === 0 || parseFloat(proc.cpu) === 0)) {
+          return { ...proc, cpu: cpuData.cpu, cpuPercent: cpuData.cpuPercent };
+        }
+        return proc;
+      });
+    };
+
+    // Get process data - ALWAYS use monitoring service, use cache on failure
+    const getProcessData = async (options = {}) => {
+      try {
+        let data = await monitoringService.getProcessList(options).catch(() => []);
+        
+        if (data && data.length > 0) {
+          // Update stable cache only if count is stable (prevent sudden drops)
+          if (data.length >= lastStableProcessCount * 0.8 || lastStableProcessCount === 0) {
+            stableProcessCache = data;
+            lastStableProcessCount = data.length;
+          }
+          return enrichWithBatteryData(data);
+        }
+        
+        // If monitoring failed, return cached data (never fall back to battery-only)
+        if (stableProcessCache.length > 0) {
+          console.log('[Stream] Using stable cache:', stableProcessCache.length);
+          return enrichWithBatteryData(stableProcessCache);
+        }
+        
+        return [];
+      } catch (error) {
+        console.error('[Stream] getProcessData error:', error);
+        // Return cache on error
+        return stableProcessCache.length > 0 ? enrichWithBatteryData(stableProcessCache) : [];
       }
-      
-      // Fallback to instant data (may have zeros, but better than nothing)
-      data = await monitoringService.getProcessList({ instant: true }).catch(() => []);
-      return data || [];
     };
     
     if (isStreamActive) {
-      // Even if stream is already running, send current data immediately
-      getBestProcessData().then(data => {
+      // Stream already running, send current data immediately
+      getProcessData({ instant: true }).then(data => {
         if (!event.sender.isDestroyed() && data?.length > 0) {
           event.sender.send('process-update', { success: true, data });
         }
@@ -670,44 +701,34 @@ ipcMain.handle('system:start-process-stream', async (event) => {
     }
     
     isStreamActive = true;
-    currentPollInterval = 2000;
     
     console.log('[Stream] Starting process stream...');
     
-    // STEP 1: Send battery service data IMMEDIATELY (already collected, has real CPU data!)
-    if (batteryService) {
-      const instantData = batteryService.getTrackedProcessList();
-      if (!event.sender.isDestroyed() && hasQualityData(instantData)) {
-        console.log(`[Stream] ⚡ Battery service instant: ${instantData.length} processes with quality data`);
-        event.sender.send('process-update', { success: true, data: instantData });
-      }
-    }
-    
-    // STEP 2: Try monitoring service - only send if it has quality data
-    monitoringService.getProcessList({ freshFetch: true }).then(data => {
-      if (!event.sender.isDestroyed() && hasQualityData(data)) {
-        console.log(`[Stream] ⚡ Monitoring enriched: ${data.length} processes`);
+    // STEP 1: Send instant data immediately
+    getProcessData({ instant: true }).then(data => {
+      if (!event.sender.isDestroyed() && data?.length > 0) {
+        console.log(`[Stream] ⚡ Instant: ${data.length} processes`);
         event.sender.send('process-update', { success: true, data });
       }
     }).catch(() => {});
     
-    // STEP 3: After 500ms, ensure we have quality data
+    // STEP 2: After 300ms, get enriched data with CPU sampling
     setTimeout(() => {
       if (!event.sender.isDestroyed() && isStreamActive) {
-        getBestProcessData().then(data => {
+        getProcessData({ freshFetch: true }).then(data => {
           if (data?.length > 0) {
-            console.log(`[Stream] ✅ Quality check: ${data.length} processes`);
+            console.log(`[Stream] ✅ Enriched: ${data.length} processes`);
             event.sender.send('process-update', { success: true, data });
           }
-        });
+        }).catch(() => {});
       }
-    }, 500);
+    }, 300);
     
-    // STEP 4: Continuous polling every 2s for real-time updates
+    // STEP 3: Continuous polling every 2s for real-time updates
     processStreamInterval = setInterval(async () => {
       if (!event.sender.isDestroyed() && isStreamActive && isTabVisible) {
         try {
-          const data = await getBestProcessData();
+          const data = await getProcessData({ freshFetch: true });
           if (data?.length > 0) {
             event.sender.send('process-update', { success: true, data });
           }
