@@ -288,10 +288,25 @@ class MonitoringService {
       // Process metrics (lightweight count only)
       const processMetrics = processCount;
 
-      // System info
+      // System info - Detect actual running environment
+      // Check if running in WSL (Windows Subsystem for Linux) or native Linux
+      let displayPlatform = osInfo.platform;
+      let displayDistro = osInfo.distro;
+      
+      // Detect WSL environment - when running from Ubuntu terminal
+      const isWSL = process.env.WSL_DISTRO_NAME || 
+                    process.env.WSLENV || 
+                    (process.env.PATH && process.env.PATH.includes('/mnt/c'));
+      
+      if (isWSL) {
+        // Running from Ubuntu/WSL terminal - show as Linux
+        displayPlatform = 'linux';
+        displayDistro = 'Linux';
+      }
+      
       const systemInfo = {
-        platform: osInfo.platform,
-        distro: osInfo.distro,
+        platform: displayPlatform,
+        distro: displayDistro,
         release: osInfo.release,
         arch: osInfo.arch,
         hostname: osInfo.hostname,

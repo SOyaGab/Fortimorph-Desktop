@@ -849,7 +849,11 @@ const Dashboard = () => {
                   <div className="text-white text-3xl font-bold mb-2">
                     {formatUptime(metrics.system.uptime)}
                   </div>
-                  <div className="text-gray-400 text-sm">{metrics.system.platform}</div>
+                  <div className="text-gray-400 text-sm">
+                    {metrics.system.distro || (metrics.system.platform === 'win32' ? 'Windows' : 
+                      metrics.system.platform === 'darwin' ? 'macOS' : 
+                      metrics.system.platform === 'linux' ? 'Linux' : metrics.system.platform)}
+                  </div>
                 </>
               ) : (
                 <>
