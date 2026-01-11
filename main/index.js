@@ -529,9 +529,12 @@ ipcMain.handle('database:health-check', async () => {
   }
 });
 
-ipcMain.handle('auth:manual-verify', async (_event, { uid }) => {
+ipcMain.handle('auth:manual-verify', async (_event, { uid, email }) => {
   try {
-    const result = db.manuallyVerifyUser(uid);
+    // Accept either uid or email
+    const identifier = email || uid;
+    console.log(`Manual verification request for: ${identifier}`);
+    const result = db.manuallyVerifyUser(identifier);
     return result;
   } catch (error) {
     return { success: false, error: error.message };
@@ -545,6 +548,18 @@ ipcMain.handle('auth:delete-user', async (_event, { uid, options }) => {
     return result;
   } catch (error) {
     console.error('Delete user error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Clean up local database when user is deleted from Firebase
+ipcMain.handle('auth:cleanup-deleted-user', async (_event, { email }) => {
+  try {
+    console.log('Cleanup deleted user request:', email);
+    const result = firebase.cleanupDeletedUser(email);
+    return result;
+  } catch (error) {
+    console.error('Cleanup deleted user error:', error);
     return { success: false, error: error.message };
   }
 });
@@ -628,7 +643,7 @@ ipcMain.handle('system:get-processes', async (event, options = {}) => {
 // Real-time process streaming for Processes tab with adaptive polling
 let processStreamInterval = null;
 let isStreamActive = false;
-let currentPollInterval = 2000; // 2 seconds for smooth updates
+let currentPollInterval = 2000; // Faster 2-second polling for real-time updates
 let consecutiveNoChangeCount = 0;
 let isTabVisible = true;
 
@@ -704,7 +719,7 @@ ipcMain.handle('system:start-process-stream', async (event) => {
     
     console.log('[Stream] Starting process stream...');
     
-    // STEP 1: Send instant data immediately
+    // STEP 1: Send instant data immediately (no CPU sampling - very fast)
     getProcessData({ instant: true }).then(data => {
       if (!event.sender.isDestroyed() && data?.length > 0) {
         console.log(`[Stream] ⚡ Instant: ${data.length} processes`);
@@ -712,23 +727,28 @@ ipcMain.handle('system:start-process-stream', async (event) => {
       }
     }).catch(() => {});
     
-    // STEP 2: After 300ms, get enriched data with CPU sampling
+    // STEP 2: First enriched fetch after 1 second (with CPU sampling)
+    // This gives the UI time to render with instant data first
     setTimeout(() => {
       if (!event.sender.isDestroyed() && isStreamActive) {
         getProcessData({ freshFetch: true }).then(data => {
           if (data?.length > 0) {
-            console.log(`[Stream] ✅ Enriched: ${data.length} processes`);
+            console.log(`[Stream] ✅ First enriched: ${data.length} processes`);
             event.sender.send('process-update', { success: true, data });
           }
         }).catch(() => {});
       }
-    }, 300);
+    }, 1000);
     
-    // STEP 3: Continuous polling every 2s for real-time updates
+    // STEP 3: Continuous polling - alternate between instant and enriched for performance
+    let pollCount = 0;
     processStreamInterval = setInterval(async () => {
       if (!event.sender.isDestroyed() && isStreamActive && isTabVisible) {
         try {
-          const data = await getProcessData({ freshFetch: true });
+          pollCount++;
+          // Only do CPU enrichment every 3rd poll (every 12 seconds) to reduce CPU load
+          const useEnriched = pollCount % 3 === 0;
+          const data = await getProcessData(useEnriched ? { freshFetch: true } : { instant: true });
           if (data?.length > 0) {
             event.sender.send('process-update', { success: true, data });
           }

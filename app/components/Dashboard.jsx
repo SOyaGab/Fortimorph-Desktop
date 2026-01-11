@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense, memo } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { Loader2, RefreshCw, Search, AlertTriangle, FolderOpen, Folder, Trash2, List, LayoutGrid, ExternalLink, FileText } from 'lucide-react';
+import ProcessRow from './ProcessRow';
 
-const MAX_CHART_POINTS = 180; // Keep roughly six minutes of data on screen
+const MAX_CHART_POINTS = 60; // Keep roughly two minutes of data for better performance
 const formatTimeLabel = (timestamp) =>
   new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
@@ -20,7 +21,7 @@ const Dashboard = () => {
   const [error, setError] = useState(null);
   const [selectedView, setSelectedView] = useState('overview'); // overview, cpu, memory, processes, storage, files, logs, battery
   const [autoRefresh, setAutoRefresh] = useState(true); // Enable/disable auto-refresh - DEFAULT ON for real-time updates
-  const refreshInterval = 2000; // 2 seconds for smooth real-time updates
+  const refreshInterval = 3000; // PERF: 3 seconds for better performance (was 2s)
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
   const [lastUpdateTime, setLastUpdateTime] = useState(Date.now());
@@ -248,15 +249,9 @@ const Dashboard = () => {
         // Fetch metrics in background - UI is already visible
         await fetchMetrics();
         
-        // Pre-fetch storage data in background for instant loading when user navigates to Storage tab
-        console.log('🚀 Pre-loading storage data in background...');
-        // Run both in parallel for faster loading
-        Promise.all([
-          fetchInstalledApps(true).catch(err => console.warn('Background apps fetch error:', err)),
-          fetchStorageAnalysis(100).catch(err => console.warn('Background storage fetch error:', err))
-        ]).then(() => {
-          console.log('✅ Storage data pre-loaded successfully');
-        });
+        // PERFORMANCE: Don't pre-fetch storage/apps - load on-demand only
+        // This significantly improves initial load time
+        console.log('✅ Dashboard initialized - storage data will load on demand');
       } catch (err) {
         console.error('Initialization error:', err);
         setError('Failed to initialize dashboard');
@@ -423,19 +418,31 @@ const Dashboard = () => {
     }
 
     try {
-      const result = await window.electronAPI.system.endProcess(pid, false);
+      // Immediately remove from UI for instant feedback
+      setProcesses(prev => prev.filter(p => p.pid !== pid));
+      
+      // Force kill on Windows for reliable termination
+      const result = await window.electronAPI.system.endProcess(pid, true);
       if (result.success && result.data.success) {
-        alert(`Process ${processName} (PID: ${pid}) ended successfully`);
-        // Clear search term to avoid stuck state
+        // Process ended successfully - refresh list
         setProcessSearchTerm('');
         await fetchProcesses();
         await fetchMetrics();
       } else {
-        alert('Failed to end process: ' + (result.data?.message || result.error));
+        // Check for admin requirement
+        const message = result.data?.message || result.error || 'Unknown error';
+        if (result.data?.requiresAdmin) {
+          alert(`Cannot end "${processName}" (PID: ${pid}):\n\n${message}\n\nTry running FortiMorph as Administrator.`);
+        } else {
+          alert('Failed to end process: ' + message);
+        }
+        // Restore process list since termination failed
+        await fetchProcesses();
       }
     } catch (error) {
       console.error('Error ending process:', error);
       alert('Error ending process: ' + error.message);
+      await fetchProcesses();
     }
   };
 
@@ -449,19 +456,29 @@ const Dashboard = () => {
     }
 
     try {
+      // Immediately remove from UI for instant feedback
+      setProcesses(prev => prev.filter(p => p.name !== processName));
+      
       const result = await window.electronAPI.system.endProcessByName(processName);
       if (result.success && result.data.success) {
-        alert(`All "${processName}" processes terminated successfully`);
-        // Clear search term to avoid stuck state
+        // Processes ended successfully - refresh list
         setProcessSearchTerm('');
         await fetchProcesses();
         await fetchMetrics();
       } else {
-        alert('Failed to end processes: ' + (result.data?.message || result.error));
+        const message = result.data?.message || result.error || 'Unknown error';
+        if (message.includes('Access') || message.includes('denied')) {
+          alert(`Cannot end "${processName}" processes:\n\n${message}\n\nTry running FortiMorph as Administrator.`);
+        } else {
+          alert('Failed to end processes: ' + message);
+        }
+        // Restore process list since termination failed
+        await fetchProcesses();
       }
     } catch (error) {
       console.error('Error ending processes:', error);
       alert('Error ending processes: ' + error.message);
+      await fetchProcesses();
     }
   };
 
@@ -619,6 +636,17 @@ const Dashboard = () => {
     // Default: show only top 20 processes unless explicitly requested
     return showAllProcesses ? filteredProcesses.slice(0, 100) : filteredProcesses.slice(0, 20);
   }, [filteredProcesses, showAllProcesses, debouncedSearchTerm]);
+
+  // PERF: Pre-compute process name counts to avoid O(n²) filter in render
+  const processNameCounts = useMemo(() => {
+    if (!processes || processes.length === 0) return new Map();
+    const counts = new Map();
+    for (const proc of processes) {
+      const name = proc.name;
+      counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    return counts;
+  }, [processes]);
 
   // No more full-screen loading - show UI immediately with loading indicators
 
@@ -904,7 +932,7 @@ const Dashboard = () => {
           <div className="text-center text-gray-400 text-sm mb-4">
             <span className="inline-flex items-center">
               <span className={`inline-block w-2 h-2 rounded-full mr-2 ${autoRefresh ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`}></span>
-              {autoRefresh ? 'Live updating every 2s' : 'Auto-refresh disabled'}
+              {autoRefresh ? 'Live updating every 3s' : 'Auto-refresh disabled'}
               {metrics && ` • Last updated: ${new Date(lastUpdateTime).toLocaleTimeString()}`}
             </span>
           </div>
@@ -1227,8 +1255,8 @@ const Dashboard = () => {
                 </thead>
                 <tbody>
                   {displayedProcesses.map((proc) => {
-                    // Check if multiple processes with same name exist
-                    const sameNameCount = processes.filter(p => p.name === proc.name).length;
+                    // PERF: Use pre-computed counts instead of filtering on every row
+                    const sameNameCount = processNameCounts.get(proc.name) || 1;
                     const hasMultiple = sameNameCount > 1;
                     
                     return (

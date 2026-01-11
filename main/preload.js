@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     resendVerification: (email) => ipcRenderer.invoke('auth:resend-verification', { email }),
     debugUsers: () => ipcRenderer.invoke('auth:debug-users'),
     manualVerify: (uid) => ipcRenderer.invoke('auth:manual-verify', { uid }),
+    cleanupDeletedUser: (email) => ipcRenderer.invoke('auth:cleanup-deleted-user', { email }),
   },
   
   // Database operations

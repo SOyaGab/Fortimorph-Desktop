@@ -834,7 +834,9 @@ class DatabaseService {
       insertStmt.free();
     }
     
-    this.saveDatabase();
+    // Use immediate save for critical auth operations
+    this.saveDatabaseImmediate();
+    console.log(`✅ Verification code saved for ${email} (UID: ${uid})`);
     return { success: true };
   }
 
@@ -998,26 +1000,53 @@ class DatabaseService {
     stmt2.free();
     console.log('✓ Updated verification_codes table');
     
-    this.saveDatabase();
+    // Use immediate save for critical auth operations
+    this.saveDatabaseImmediate();
     return { success: true };
   }
 
   isEmailVerified(identifier) {
+    console.log(`🔍 Checking email verification for: ${identifier}`);
+    
     // Check user table first (local mode uses email)
     const user = this.getUserByEmail(identifier);
     if (user) {
+      console.log(`  → Found in user table, verified: ${user.verified === 1}`);
       return user.verified === 1;
     }
     
-    // Check verification_codes table (Firebase mode uses uid)
-    const stmt = this.db.prepare('SELECT verified FROM verification_codes WHERE uid = ?');
+    // Check verification_codes table by UID (Firebase mode)
+    let stmt = this.db.prepare('SELECT verified FROM verification_codes WHERE uid = ?');
     stmt.bind([identifier]);
     if (stmt.step()) {
       const row = stmt.getAsObject();
       stmt.free();
+      console.log(`  → Found by UID in verification_codes, verified: ${row.verified === 1}`);
       return row.verified === 1;
     }
     stmt.free();
+    
+    // ALSO check verification_codes table by EMAIL (Firebase mode - critical fix!)
+    stmt = this.db.prepare('SELECT verified FROM verification_codes WHERE email = ?');
+    stmt.bind([identifier]);
+    if (stmt.step()) {
+      const row = stmt.getAsObject();
+      stmt.free();
+      console.log(`  → Found by email in verification_codes, verified: ${row.verified === 1}`);
+      return row.verified === 1;
+    }
+    stmt.free();
+    
+    // Check firebase_users_cache for email_verified status
+    if (identifier.includes('@')) {
+      const cachedUser = this.getFirebaseUserByEmail(identifier);
+      if (cachedUser && cachedUser.email_verified === 1) {
+        console.log(`  → Found in firebase_users_cache, verified: true`);
+        return true;
+      }
+    }
+    
+    console.log(`  → No verification record found for: ${identifier}`);
     // If no record found, assume not verified
     return false;
   }
@@ -1053,7 +1082,9 @@ class DatabaseService {
       ]);
       stmt.step();
       stmt.free();
-      this.saveDatabase();
+      
+      // Use immediate save for critical auth operations
+      this.saveDatabaseImmediate();
       
       console.log(`✅ Synced Firebase user to local cache: ${firebaseUser.email}`);
       return { success: true };
@@ -1128,27 +1159,69 @@ class DatabaseService {
     return codes;
   }
 
-  manuallyVerifyUser(uid) {
+  manuallyVerifyUser(identifier) {
     try {
-      // Update verification_codes table
-      const selectStmt = this.db.prepare('SELECT uid FROM verification_codes WHERE uid = ?');
-      selectStmt.bind([uid]);
-      const exists = selectStmt.step();
+      console.log(`🔧 Manual verification for: ${identifier}`);
+      
+      // Check if identifier is email or UID
+      const isEmail = identifier.includes('@');
+      
+      // Update verification_codes table by UID
+      let selectStmt = this.db.prepare('SELECT uid FROM verification_codes WHERE uid = ?');
+      selectStmt.bind([identifier]);
+      let exists = selectStmt.step();
       selectStmt.free();
 
       if (exists) {
         const updateStmt = this.db.prepare('UPDATE verification_codes SET verified = 1 WHERE uid = ?');
-        updateStmt.bind([uid]);
+        updateStmt.bind([identifier]);
         updateStmt.step();
         updateStmt.free();
+        console.log('✓ Updated verification_codes by UID');
+      } else if (isEmail) {
+        // Try by email
+        selectStmt = this.db.prepare('SELECT uid, email FROM verification_codes WHERE email = ?');
+        selectStmt.bind([identifier]);
+        if (selectStmt.step()) {
+          const row = selectStmt.getAsObject();
+          selectStmt.free();
+          const updateStmt = this.db.prepare('UPDATE verification_codes SET verified = 1 WHERE email = ?');
+          updateStmt.bind([identifier]);
+          updateStmt.step();
+          updateStmt.free();
+          console.log('✓ Updated verification_codes by email');
+        } else {
+          selectStmt.free();
+          // Create a verification record by email
+          const insertStmt = this.db.prepare(
+            'INSERT INTO verification_codes (uid, email, code, expires_at, verified) VALUES (?, ?, ?, ?, 1)'
+          );
+          insertStmt.bind([`manual_${Date.now()}`, identifier, 'MANUAL', 0]);
+          insertStmt.step();
+          insertStmt.free();
+          console.log('✓ Created new verified record for email');
+        }
       } else {
         // Create a verification record
         const insertStmt = this.db.prepare(
           'INSERT INTO verification_codes (uid, code, expires_at, verified) VALUES (?, ?, ?, 1)'
         );
-        insertStmt.bind([uid, 'MANUAL', 0]);
+        insertStmt.bind([identifier, 'MANUAL', 0]);
         insertStmt.step();
         insertStmt.free();
+        console.log('✓ Created new verified record for UID');
+      }
+
+      // Also update user table if exists (for local accounts)
+      if (isEmail) {
+        const user = this.getUserByEmail(identifier);
+        if (user) {
+          const updateUserStmt = this.db.prepare('UPDATE user SET verified = 1 WHERE email = ?');
+          updateUserStmt.bind([identifier]);
+          updateUserStmt.step();
+          updateUserStmt.free();
+          console.log('✓ Updated user table');
+        }
       }
 
       this.saveDatabase();
@@ -1316,6 +1389,98 @@ class DatabaseService {
     }
     stmt.free();
     return null;
+  }
+
+  /**
+   * Delete user data by email
+   * Finds the UID from various tables and deletes all associated data
+   * @param {String} email - User email address
+   * @returns {Object} Result with success status
+   */
+  deleteUserByEmail(email) {
+    try {
+      console.log(`🗑️ Deleting user by email: ${email}`);
+      
+      // Find UID from firebase_users_cache
+      let uid = null;
+      let stmt = this.db.prepare('SELECT uid FROM firebase_users_cache WHERE email = ?');
+      stmt.bind([email]);
+      if (stmt.step()) {
+        uid = stmt.getAsObject().uid;
+      }
+      stmt.free();
+      
+      // If not found, check verification_codes
+      if (!uid) {
+        stmt = this.db.prepare('SELECT uid FROM verification_codes WHERE email = ?');
+        stmt.bind([email]);
+        if (stmt.step()) {
+          uid = stmt.getAsObject().uid;
+        }
+        stmt.free();
+      }
+      
+      // If not found, check local user table
+      if (!uid) {
+        stmt = this.db.prepare('SELECT id FROM user WHERE email = ?');
+        stmt.bind([email]);
+        if (stmt.step()) {
+          uid = `local_${stmt.getAsObject().id}`;
+        }
+        stmt.free();
+      }
+      
+      if (uid) {
+        console.log(`  Found UID: ${uid}`);
+        return this.deleteUserData(uid);
+      }
+      
+      // Direct cleanup by email if no UID found
+      console.log('  No UID found, cleaning up by email directly...');
+      
+      stmt = this.db.prepare('DELETE FROM firebase_users_cache WHERE email = ?');
+      stmt.bind([email]);
+      stmt.step();
+      stmt.free();
+      
+      stmt = this.db.prepare('DELETE FROM verification_codes WHERE email = ?');
+      stmt.bind([email]);
+      stmt.step();
+      stmt.free();
+      
+      stmt = this.db.prepare('DELETE FROM user WHERE email = ?');
+      stmt.bind([email]);
+      stmt.step();
+      stmt.free();
+      
+      // Use immediate save for auth operations
+      this.saveDatabaseImmediate();
+      
+      console.log(`✓ Cleaned up data for email: ${email}`);
+      return { success: true, message: `Data cleaned up for ${email}` };
+    } catch (error) {
+      console.error('❌ Error deleting user by email:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Get all cached Firebase users
+   * Used for syncing with Firebase to detect deleted users
+   */
+  getAllCachedFirebaseUsers() {
+    try {
+      const stmt = this.db.prepare('SELECT uid, email FROM firebase_users_cache');
+      const users = [];
+      while (stmt.step()) {
+        users.push(stmt.getAsObject());
+      }
+      stmt.free();
+      return users;
+    } catch (error) {
+      console.error('Error getting cached users:', error);
+      return [];
+    }
   }
 
   /**

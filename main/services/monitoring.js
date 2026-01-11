@@ -76,9 +76,9 @@ class MonitoringService {
       disk: [],
       timestamps: []
     };
-    this.maxHistorySize = 180; // Keep 180 data points (6 minutes at 2s intervals)
+    this.maxHistorySize = 60; // PERF: Keep 60 data points (2 minutes at 2s intervals) for better performance
     this.lastProcessFetch = 0; // Timestamp of last fetch
-    this.minFetchInterval = 1000; // 1 second minimum for faster updates
+    this.minFetchInterval = 1500; // PERF: 1.5 second minimum to reduce CPU load
     this.isProcessFetching = false; // Prevent concurrent fetches
     this.cachedProcessList = []; // Cache last successful fetch
     this.maxPidSampleSizeFull = 60; // Limit heavy pidusage sampling to top offenders (full refresh)
@@ -184,39 +184,29 @@ class MonitoringService {
       
       console.log('[Monitoring] Raw CPU load:', cpuLoadValue.toFixed(2) + '%, Average cores:', avgCoreLoad.toFixed(2) + '%, Using:', actualCpuLoad.toFixed(2) + '%');
       
-      // Use os-utils for a quick CPU sample (measures over ~1 second internally)
-      const osUtilsCpuPromise = new Promise((resolve) => {
-        osUtils.cpuUsage((usage) => {
-          resolve(Math.round(usage * 10000) / 100); // Round to 2 decimals
+      // PERFORMANCE OPTIMIZATION: Skip os-utils if we have a valid systeminformation reading
+      // os-utils takes ~1 second to measure and blocks the UI - only use it sparingly
+      let finalCpuLoad = actualCpuLoad;
+      
+      // Only use os-utils if the reading seems suspicious (exactly 0% or 100%)
+      if (actualCpuLoad === 0 || actualCpuLoad === 100) {
+        console.log('[Monitoring] Suspicious CPU reading, using os-utils for verification...');
+        const osUtilsCpuPromise = new Promise((resolve) => {
+          osUtils.cpuUsage((usage) => {
+            resolve(Math.round(usage * 10000) / 100);
+          });
         });
-      });
-      
-      // Get os-utils reading with 1 second timeout
-      let osUtilsCpu = await Promise.race([
-        osUtilsCpuPromise,
-        new Promise(resolve => setTimeout(() => resolve(null), 1100))
-      ]);
-      
-      // Final CPU value logic:
-      let finalCpuLoad;
-      
-      if (osUtilsCpu !== null) {
-        // os-utils succeeded - use a weighted average for smoother readings
-        console.log('[Monitoring] systeminformation:', actualCpuLoad.toFixed(2) + '%, os-utils:', osUtilsCpu.toFixed(2) + '%');
         
-        // If both agree (within 15%), trust systeminformation (it's faster)
-        if (Math.abs(actualCpuLoad - osUtilsCpu) <= 15) {
-          finalCpuLoad = actualCpuLoad;
-        } 
-        // If they disagree significantly, use weighted average (70% os-utils, 30% systeminformation)
-        else {
-          finalCpuLoad = (osUtilsCpu * 0.7) + (actualCpuLoad * 0.3);
-          console.log('[Monitoring] Large difference detected, using weighted average:', finalCpuLoad.toFixed(2) + '%');
+        // Short timeout - 500ms max
+        const osUtilsCpu = await Promise.race([
+          osUtilsCpuPromise,
+          new Promise(resolve => setTimeout(() => resolve(null), 500))
+        ]);
+        
+        if (osUtilsCpu !== null) {
+          console.log('[Monitoring] os-utils verification:', osUtilsCpu.toFixed(2) + '%');
+          finalCpuLoad = osUtilsCpu;
         }
-      } else {
-        // os-utils timed out, use systeminformation
-        console.log('[Monitoring] os-utils timeout, using systeminformation:', actualCpuLoad.toFixed(2) + '%');
-        finalCpuLoad = actualCpuLoad;
       }
       
       // Apply smoothing if we have previous reading to prevent jumpy values
@@ -428,16 +418,17 @@ class MonitoringService {
       let processList = await getWindowsProcesses();
       processList.sort((a, b) => b.memory - a.memory);
       
-      // Get PIDs for CPU sampling
-      const topPids = processList.slice(0, 80).map(p => p.pid).filter(pid => pid > 0);
+      // PERF: Only sample top 40 processes for CPU (reduced from 80)
+      // This cuts pidusage time roughly in half while still showing CPU for top processes
+      const topPids = processList.slice(0, 40).map(p => p.pid).filter(pid => pid > 0);
       
-      // Sample CPU if requested
+      // Sample CPU if requested - use shorter timeout
       let cpuStats = {};
       if (enrichCpu && topPids.length > 0) {
         try {
           cpuStats = await Promise.race([
             pidusage(topPids),
-            new Promise(resolve => setTimeout(() => resolve({}), 1000))
+            new Promise(resolve => setTimeout(() => resolve({}), 600)) // Reduced from 1000ms
           ]);
         } catch (e) {
           // Silent fail - continue without CPU

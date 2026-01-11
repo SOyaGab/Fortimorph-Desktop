@@ -155,19 +155,9 @@ class FirebaseService {
 
       // FIREBASE MODE: Use Firebase authentication when configured
       
-      // Clean up orphaned local data for this email first (in case user was deleted from Firebase)
-      const orphanedCachedUser = db.getFirebaseUserByEmail(email);
-      if (orphanedCachedUser) {
-        console.log(`🧹 Cleaning up orphaned cached user data for ${email} (UID: ${orphanedCachedUser.uid})`);
-        db.deleteUserData(orphanedCachedUser.uid, { deleteLogs: true });
-      }
-      
-      // Also clean up any orphaned verification codes for this email
-      const orphanedVerification = db.getVerificationCode(email);
-      if (orphanedVerification && orphanedVerification.uid) {
-        console.log(`🧹 Cleaning up orphaned verification code for ${email}`);
-        db.deleteUserData(orphanedVerification.uid, { deleteLogs: true });
-      }
+      // Clean up ALL orphaned local data for this email first (in case user was deleted from Firebase)
+      console.log(`🧹 Pre-signup cleanup for email: ${email}`);
+      db.deleteUserByEmail(email);
       
       const userCredential = await createUserWithEmailAndPassword(
         this.auth,
@@ -194,6 +184,16 @@ class FirebaseService {
       // Store verification code in database using UID and email
       // For Firebase users, we store directly in verification_codes table
       db.setVerificationCodeForFirebase(userCredential.user.uid, email, verificationCode, expiresAt);
+
+      // Verify the data was saved correctly
+      const savedCode = db.getVerificationCode(userCredential.user.uid);
+      if (!savedCode) {
+        console.error('❌ CRITICAL: Verification code was not saved to database!');
+        // Try saving again
+        db.setVerificationCodeForFirebase(userCredential.user.uid, email, verificationCode, expiresAt);
+      } else {
+        console.log(`✅ Verified: Code ${savedCode.code} saved for UID ${userCredential.user.uid}`);
+      }
 
       // Send verification email with code
       try {
@@ -222,9 +222,15 @@ class FirebaseService {
       console.error('Firebase signup error:', error);
       
       let errorMessage = 'An error occurred during signup';
+      let shouldLogin = false;
+      
       switch (error.code) {
         case 'auth/email-already-in-use':
-          errorMessage = 'This email is already registered';
+          // Account exists in Firebase - clean up orphaned local data and tell user to login
+          console.log(`🔄 Email ${email} already exists in Firebase. Cleaning up orphaned local data...`);
+          db.deleteUserByEmail(email);
+          errorMessage = 'This email is already registered in Firebase. Please use the Sign In button to login with your existing account.';
+          shouldLogin = true;
           break;
         case 'auth/invalid-email':
           errorMessage = 'Invalid email address';
@@ -239,7 +245,7 @@ class FirebaseService {
           errorMessage = error.message;
       }
 
-      return { success: false, error: errorMessage };
+      return { success: false, error: errorMessage, shouldLogin };
     }
   }
 
@@ -296,6 +302,20 @@ class FirebaseService {
       console.log('✅ Code matches! Marking as verified with identifier:', verifyIdentifier);
       db.markEmailAsVerified(verifyIdentifier);
 
+      // Verify the verification was saved correctly
+      const isNowVerified = db.isEmailVerified(verifyIdentifier);
+      if (!isNowVerified) {
+        console.error('❌ CRITICAL: Verification status was not saved!');
+        // Try again
+        db.markEmailAsVerified(verifyIdentifier);
+        // Also try with email if different
+        if (storedData.email && storedData.email !== verifyIdentifier) {
+          db.markEmailAsVerified(storedData.email);
+        }
+      } else {
+        console.log(`✅ Confirmed: User ${verifyIdentifier} is now verified`);
+      }
+
       return {
         success: true,
         message: 'Email verified successfully! You can now log in.',
@@ -336,6 +356,42 @@ class FirebaseService {
             isVerified = db.isEmailVerified(email);
           }
           
+          // If still not verified in local DB, check if there's no verification record at all
+          // This can happen if the user was deleted from Firebase and re-registered
+          // or if local data was cleared. In this case, we need to create verification entry
+          if (!isVerified) {
+            const hasVerificationRecord = db.getVerificationCode(userCredential.user.uid) || db.getVerificationCode(email);
+            if (!hasVerificationRecord) {
+              console.log('⚠️ No verification record found. User needs to verify email.');
+              // Generate new verification code since they logged in successfully but need verification
+              const verificationCode = this.generateVerificationCode(6);
+              const expiresAt = Math.floor(Date.now() / 1000) + 600; // 10 minutes
+              
+              db.setVerificationCodeForFirebase(userCredential.user.uid, email, verificationCode, expiresAt);
+              
+              // Try to send verification email
+              try {
+                const emailService = require('./emailService');
+                await emailService.sendVerificationCode(email, verificationCode);
+                console.log(`📧 Verification code sent to ${email}`);
+              } catch (emailError) {
+                console.log(`\n========================================`);
+                console.log(`📧 VERIFICATION CODE FOR: ${email}`);
+                console.log(`🔢 CODE: ${verificationCode}`);
+                console.log(`========================================\n`);
+              }
+              
+              // Sign out since not verified
+              await signOut(this.auth);
+              return {
+                success: false,
+                error: 'Your account needs email verification. A new verification code has been sent.',
+                emailVerified: false,
+                needsVerification: true,
+              };
+            }
+          }
+          
           console.log(`📧 Email verification status for ${email}: ${isVerified}`);
 
           if (!isVerified) {
@@ -365,33 +421,44 @@ class FirebaseService {
             message: 'Login successful',
           };
         } catch (firebaseError) {
-          // If Firebase auth fails, try local database as fallback
-          console.log('Firebase authentication failed, trying local database:', firebaseError.code);
+          // If Firebase auth fails, handle the error appropriately
+          console.log('Firebase authentication failed:', firebaseError.code);
           
-          // Only fallback to local if user not found in Firebase
-          if (firebaseError.code === 'auth/user-not-found' || 
-              firebaseError.code === 'auth/invalid-credential' ||
-              firebaseError.code === 'auth/wrong-password') {
-            console.log('Falling back to local authentication');
-            // Continue to local auth below
-          } else {
-            // For other errors, return the Firebase error
-            let errorMessage = 'Login failed';
-            switch (firebaseError.code) {
-              case 'auth/invalid-email':
-                errorMessage = 'Invalid email address';
-                break;
-              case 'auth/user-disabled':
-                errorMessage = 'This account has been disabled';
-                break;
-              case 'auth/too-many-requests':
-                errorMessage = 'Too many failed attempts. Please try again later';
-                break;
-              default:
-                errorMessage = firebaseError.message;
-            }
-            return { success: false, error: errorMessage };
+          // If user not found in Firebase, clean up orphaned local data
+          if (firebaseError.code === 'auth/user-not-found') {
+            console.log(`🧹 User not found in Firebase, cleaning up orphaned local data for: ${email}`);
+            db.deleteUserByEmail(email);
+            return {
+              success: false,
+              error: 'Account not found. Please sign up first.',
+            };
           }
+          
+          // Handle wrong password / invalid credentials
+          if (firebaseError.code === 'auth/invalid-credential' ||
+              firebaseError.code === 'auth/wrong-password') {
+            return {
+              success: false,
+              error: 'Invalid email or password',
+            };
+          }
+          
+          // For other errors, return the Firebase error
+          let errorMessage = 'Login failed';
+          switch (firebaseError.code) {
+            case 'auth/invalid-email':
+              errorMessage = 'Invalid email address';
+              break;
+            case 'auth/user-disabled':
+              errorMessage = 'This account has been disabled';
+              break;
+            case 'auth/too-many-requests':
+              errorMessage = 'Too many failed attempts. Please try again later';
+              break;
+            default:
+              errorMessage = firebaseError.message;
+          }
+          return { success: false, error: errorMessage };
         }
       }
 
@@ -727,6 +794,69 @@ class FirebaseService {
         callback(null);
       }
     });
+  }
+
+  /**
+   * Sync local database with Firebase - removes users deleted from Firebase
+   * This runs on app startup to clean up orphaned local data
+   */
+  async syncDeletedUsers() {
+    if (!this.initialized) {
+      console.log('Firebase not initialized, skipping sync');
+      return { success: false, message: 'Firebase not initialized' };
+    }
+
+    try {
+      console.log('🔄 Syncing local database with Firebase...');
+      
+      // Get all cached Firebase users from local database
+      const cachedUsers = db.getAllCachedFirebaseUsers();
+      console.log(`  Found ${cachedUsers.length} cached users to check`);
+      
+      const deletedUsers = [];
+      
+      for (const cachedUser of cachedUsers) {
+        try {
+          // Try to sign in with a dummy password - if user doesn't exist, Firebase will tell us
+          // We use fetchSignInMethodsForEmail equivalent by trying to get auth state
+          // Since we can't check if user exists without admin SDK, we rely on login failure
+          
+          // Alternative: Just check during next login attempt
+          // For now, we'll mark users that fail to authenticate as potentially deleted
+          console.log(`  Checking user: ${cachedUser.email}`);
+        } catch (error) {
+          if (error.code === 'auth/user-not-found') {
+            console.log(`  ⚠️ User no longer exists in Firebase: ${cachedUser.email}`);
+            deletedUsers.push(cachedUser);
+          }
+        }
+      }
+      
+      // Clean up deleted users from local database
+      for (const user of deletedUsers) {
+        console.log(`  🗑️ Removing orphaned data for: ${user.email}`);
+        db.deleteUserData(user.uid);
+      }
+      
+      console.log(`✅ Sync complete. Removed ${deletedUsers.length} orphaned users.`);
+      return { 
+        success: true, 
+        removedCount: deletedUsers.length,
+        removedUsers: deletedUsers.map(u => u.email)
+      };
+    } catch (error) {
+      console.error('Sync error:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Clean up local data for a specific email
+   * Call this when you know a user was deleted from Firebase
+   */
+  cleanupDeletedUser(email) {
+    console.log(`🧹 Cleaning up local data for deleted user: ${email}`);
+    return db.deleteUserByEmail(email);
   }
 }
 

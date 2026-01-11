@@ -262,10 +262,77 @@ class OptimizerService {
   /**
    * End a process by PID
    * @param {number} pid - Process ID to terminate
-   * @param {boolean} force - Force kill if true
+   * @param {boolean} force - Force kill if true (always force on Windows)
    * @returns {Promise<Object>} Result of process termination
    */
   async endProcess(pid, force = false) {
+    // On Windows, use taskkill command directly for reliable process termination
+    if (process.platform === 'win32') {
+      return new Promise((resolve) => {
+        const { spawn } = require('child_process');
+        // Use /F for force kill, /PID for process ID, /T for tree kill (children too)
+        const taskkill = spawn('taskkill', ['/F', '/PID', String(pid), '/T'], {
+          windowsHide: true
+        });
+        
+        let stdout = '';
+        let stderr = '';
+        
+        taskkill.stdout.on('data', (data) => { stdout += data.toString(); });
+        taskkill.stderr.on('data', (data) => { stderr += data.toString(); });
+        
+        const timeout = setTimeout(() => {
+          taskkill.kill();
+          resolve({
+            success: false,
+            pid,
+            message: `Timeout while terminating process ${pid}`
+          });
+        }, 5000);
+        
+        taskkill.on('close', (code) => {
+          clearTimeout(timeout);
+          const output = stdout + stderr;
+          
+          if (code === 0) {
+            resolve({
+              success: true,
+              pid,
+              message: `Process ${pid} and its children terminated successfully`
+            });
+          } else if (output.includes('not found') || output.includes('No tasks') || 
+                     output.includes('not running') || output.includes('Access is denied')) {
+            // Process may already be terminated or require admin rights
+            const isAccessDenied = output.includes('Access is denied');
+            resolve({
+              success: !isAccessDenied,
+              pid,
+              message: isAccessDenied 
+                ? `Access denied: Process ${pid} may be a system process or require administrator privileges`
+                : `Process ${pid} is no longer running`,
+              requiresAdmin: isAccessDenied
+            });
+          } else {
+            resolve({
+              success: false,
+              pid,
+              message: `Failed to terminate process ${pid}: ${output || 'Unknown error'}`
+            });
+          }
+        });
+        
+        taskkill.on('error', (err) => {
+          clearTimeout(timeout);
+          resolve({
+            success: false,
+            pid,
+            message: `Failed to terminate process ${pid}: ${err.message}`
+          });
+        });
+      });
+    }
+    
+    // Fallback for Unix-like systems using tree-kill
     return new Promise((resolve) => {
       const signal = force ? 'SIGKILL' : 'SIGTERM';
       
